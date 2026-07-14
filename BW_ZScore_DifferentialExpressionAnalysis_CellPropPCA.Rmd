@@ -1,0 +1,190 @@
+---
+title: "Birthweight Differential Expression Analysis w/Cell Prop PCA"
+author: "Samantha Lapehn"
+date: "2025-11-21"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Birthweight Z-Score Differential Expression Analysis - PCA Cell Proportions Adjustment
+This code will be used to evaluate the association between birthweight z-score and the placental transcriptome. We will adjust for cell types via PCA in this analysis.This analysis is completed in CANDLE and PATHWAYS GAPPS (N=1009) 
+
+### Load Packages
+```{r load packages}
+library(tidyverse)
+library(edgeR)
+library(RColorBrewer)
+library(org.Hs.eg.db)
+library(biomaRt)
+```
+
+### Load Data
+```{r load data}
+#Load Filtered Normalized RNAseq Data
+load(file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/FilteredNormalized_RNAseq_CANDLEGAPPS_N1009_112125.RData")
+
+#Loading the covariates for the N=1009 CANDLE/GAPPS Datasets
+#This is the updated version with the BW_ZScores
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_111825.RData")
+
+
+#Loading Cell Proportions Data
+load(file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/ImputedCellProportions_withcollapse_CANDLEGAPPS_N1009_111825.RData")
+```
+
+### Fix Data Class
+```{r Covar Data Class Fix}
+summary(CANDLE_GAPPS_FinalCovars)
+#Fix covariates with empty factor levels
+CANDLE_GAPPS_FinalCovars$Parity <- factor(CANDLE_GAPPS_FinalCovars$Parity, levels=c("0", "1"))
+CANDLE_GAPPS_FinalCovars$FetalSex <- factor(CANDLE_GAPPS_FinalCovars$FetalSex, levels=c("F", "M"))
+CANDLE_GAPPS_FinalCovars$RaceCollapsed <- factor(CANDLE_GAPPS_FinalCovars$RaceCollapsed, levels=c("1", "2", "3", "6", "7"))
+CANDLE_GAPPS_FinalCovars$Ethnicity <- factor(CANDLE_GAPPS_FinalCovars$Ethnicity, levels=c("0", "1"))
+CANDLE_GAPPS_FinalCovars$Batch <- factor(CANDLE_GAPPS_FinalCovars$Batch, levels=c("1", "2", "3", "4", "5", "6", "7"))
+
+#Get rid of empty factor levels
+CANDLE_GAPPS_FinalCovars <- droplevels(CANDLE_GAPPS_FinalCovars)
+summary(CANDLE_GAPPS_FinalCovars)
+
+```
+
+### Check Data Order
+```{r}
+identical(colnames(Y_norm$counts), CANDLE_GAPPS_FinalCovars$pathways_id)
+identical(colnames(Y_norm$counts), ciber_cells_impute_res$pathways_id)
+ciber_cells_impute_res <- ciber_cells_impute_res[
+  match(CANDLE_GAPPS_FinalCovars$pathways_id, ciber_cells_impute_res$pathways_id),
+]
+identical(colnames(Y_norm$counts), ciber_cells_impute_res$pathways_id)
+
+```
+
+### Cell Type PCA
+```{r cell type PCA}
+CellProp <- ciber_cells_impute_res
+rownames(CellProp) <- CellProp$pathways_id
+CellProp <- CellProp %>%
+  dplyr::select(-pathways_id)
+
+PCobj =prcomp(CellProp, scale=TRUE)
+PCs = PCobj$x
+PCs =as.data.frame(PCs[,1:10])
+
+summary(PCobj)$importance["Proportion of Variance", 1:10]
+
+
+#Will adjust for PCs that account for at least 5% of the variance: PCs 1-7
+#They account for ~70% of the variance.
+
+#Let's save the PCs in case we need them later
+#write.csv(PCs, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/BirthweightTranscriptome/CellType_PCs_112125.csv")
+
+```
+
+### Finalize Covars
+For this analysis we will adjust for: Parity, Fetal Sex, Maternal Age, Maternal BMI, Maternal Race, Maternal Ethnicity, Maternal Education, Prenatal Smoking, Gestational Age, Prenatal Alcohol Use, Labor Type, Delivery Method, RNAseq batch and PCs of cell type proportions that account for at least 5% of the variance.
+```{r}
+SelectedCovars <- CANDLE_GAPPS_FinalCovars %>%
+  dplyr::select(pathways_id, bw_z, Parity, FetalSex, Age, BMI, RaceCollapsed, Ethnicity, EducationCollapsed, SmokingComposite, Alcohol, LaborType, DeliveryMethod, Batch)
+rownames(SelectedCovars) <- SelectedCovars$pathways_id
+
+PCs_5Percent <- PCs[,1:7]
+
+identical(rownames(PCs_5Percent), rownames(SelectedCovars))
+SelectedCovars <- SelectedCovars %>%
+  dplyr::select(-pathways_id)
+
+SelectedCovars <- cbind(SelectedCovars, PCs_5Percent)
+
+identical(colnames(Y_norm$counts), rownames(SelectedCovars))
+```
+
+
+### Run Differential Expression Analysis
+For this analysis we will adjust for: Parity, Fetal Sex, Maternal Age, Maternal BMI, Maternal Race, Maternal Ethnicity, Maternal Education, Prenatal Smoking,Prenatal Alcohol Use, Labor Type, and Delivery Method, RNAseq Batch, AND cell type PCs that account for at least 5% of variance.
+```{r DEG Analysis}
+Covars <- colnames(SelectedCovars)
+formula_str <- paste("~", paste(Covars, collapse = " + "))
+mod <- model.matrix(as.formula(formula_str), data = SelectedCovars)
+  dim(mod)
+
+  v<-voom(Y_norm, mod, plot=TRUE) 
+  designMatrix<-v$design
+fit <- eBayes(lmFit(v, designMatrix))
+Results<-topTable(fit, coef=2,number=dim(fit)[1],adjust.method="BH") #Coefficent 2 is BW
+par(mfrow=c(1,2))
+hist(Results$P.Value,breaks=20)
+plot(Results$logFC,-log(Results$P.Value, base=10),ylim=c(0,15),pch=16,cex=0.5,,ylab="Log P Value",xlab="logFC")
+  Cutoff<-0.05/dim(Results)[1]
+  abline(h=-log(Cutoff, base=10),lwd=2,lty=2,col="blue")
+  abline(h=-log(0.05, base=10),lwd=1.5,lty=2,col="azure4")
+
+
+#save(Results, file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BirthweightTranscriptome/BWz_FullResults_CellPropPCA_112125.Rdata")
+
+#write.csv(Results, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BirthweightTranscriptome/BWz_FullResults_CellPropPCA_112125.csv")
+
+```
+
+### Volcano Plot
+```{r vplot}
+MakeVPlot <- function(Results, Title){
+  # Filter for significant genes (FDR < 0.05)
+  sig <- Results[Results$adj.P.Val < 0.05, ]
+  sig <- sig[order(sig$adj.P.Val), ]
+  
+  # Separate up and down regulated genes
+  sig_up <- sig[sig$logFC > 0, ]
+  sig_down <- sig[sig$logFC < 0, ]
+  
+  # Colors from RdBu palette
+  ColorPalette <- brewer.pal(11, "RdBu")[c(2:4, 8:10)]
+  color_up <- ColorPalette[3]
+  color_down <- ColorPalette[4]
+  
+  # Top 5 significant genes
+  top5 <- head(sig, 10)
+  
+  # Create the plot
+  library(ggplot2)
+  library(ggrepel)
+  
+  p <- ggplot(Results, aes(x = logFC, y = -log10(P.Value))) +
+    geom_point(color = "grey60", size = 0.8) +
+    geom_point(data = sig_up, color = color_up, size = 1.2) +
+    geom_point(data = sig_down, color = color_down, size = 1.2) +
+    geom_text_repel(data = top5, aes(label = genes),
+                    size = 3,
+                    max.overlaps = Inf,
+                    box.padding = 0.4,
+                    point.padding = 0.2,
+                    segment.size = 0.3,
+                    segment.color = "black") +
+    labs(title = Title,
+         x = "Effect Estimate",
+         y = "Negative Log(p-value)") +
+    coord_cartesian(xlim = c(-0.5, 0.5), ylim = c(0, 10.5)) +
+    theme_bw() + 
+    theme(plot.title = element_text(hjust = 0.5, face="bold"))
+  
+  return(p)
+}
+MakeVPlot(Results, "Birthweight Z-Scores w/Cell Proportion PCs")
+```
+
+
+### Pull Significant Results
+Pull and Save DEGs
+```{r pull DEGs}
+#Pull DEGs (FDR<0.05)
+BW_DEGs <- Results %>%
+  dplyr::filter(adj.P.Val<0.05)
+
+#write.csv(BW_DEGs, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BirthweightTranscriptome/BWz_DEGS_FDR<0.05_CellPropPCA_112125.csv")
+```
+

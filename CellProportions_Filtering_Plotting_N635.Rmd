@@ -1,0 +1,480 @@
+---
+title: "Cell Proportions- Filtering, Imputation, Plotting: N=635"
+output: html_document
+date: "2025-12-23"
+editor_options: 
+  chunk_output_type: console
+---
+
+## Cell Proportions- Filtering, Imputation, Plotting: N=635
+
+This code summarizes, plots, and filters deconvoluted cell proportions for downstream analyses for sPTB (N=635) in CANDLE and PATHWAYS GAPPS.
+
+### Upload Data and Load Packages
+```{r data and packages}
+#Load Packages
+library(tidyverse)
+library(janitor)
+library(robCompositions)
+
+#Load Data
+ciber_cells = read_csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/FromBrennan/Data/CIBERSORTx_Job8_Results.csv") %>% janitor::clean_names()
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_sPTB_122325.RData")
+```
+
+### Data Preparation
+``` {r data prep}
+# drop cols like correlation, rmse, and p_value, keep only the cell types 
+cell_types = colnames(ciber_cells[2:28])
+
+ciber_cells2 = ciber_cells %>% 
+  dplyr::rename(pathways_id = mixture) %>% 
+  dplyr::select(-p_value, -correlation, -rmse) %>%
+  dplyr::filter(ciber_cells$mixture %in% CANDLE_GAPPS_sPTB_FinalCovars$pathways_id) #Reduce to only participants with full covariates
+
+col_means <- colMeans(ciber_cells2[, 2:28], na.rm = TRUE)
+col_means = as.data.frame(col_means)
+col_means$cell_type <- rownames(col_means)
+```
+
+### Calculate percent cell type detected
+```{r Percent Detected}
+percent_detected <- sapply(cell_types, function(col_name) {
+  sum(ciber_cells2[[col_name]] != 0, na.rm = TRUE) / length(ciber_cells2[[col_name]]) * 100
+})
+
+percent_detected <- data.frame(
+  cell_type = cell_types,
+  percent_detected = percent_detected
+) %>% left_join(col_means)
+percent_detected$percent_detected[is.nan(percent_detected$percent_detected)]<-0
+percent_detected = percent_detected %>% arrange(percent_detected) %>% 
+  dplyr::rename(mean_prop=col_means) %>% 
+  mutate(mean_percent = mean_prop*100)
+
+# Save Percent Detected
+#write_csv(percent_detected, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CellTypes_PercentDetected_N635_sPTB_CANDLEGAPPS_122325.csv")
+```
+
+### Collapse some cell types
+We are going to try collapsing Fetal GZMK Natural Killers and Fetal GZMB Natural Killers as co-authors believe they "likely represent CD56high and CD56low/CD16high NK cell subsets based on review of gene expression and the literature". These two subsets were also very closely clustered in the UMAP from Campbell et al. 2023 paper.
+```{r collapse}
+ciber_cells_collapse <- ciber_cells2 %>%
+  dplyr::mutate(Fetal_Natural_Killer_GZMB_GZMK=fetal_gzmk_natural_killer + fetal_gzmb_natural_killer) %>%
+  dplyr::select(-fetal_gzmk_natural_killer, -fetal_gzmb_natural_killer)
+
+#Calculate percent detected after collapse
+cell_type_collapse <- colnames(ciber_cells_collapse[2:27])
+
+col_means_aftercollapse <- colMeans(ciber_cells_collapse[, 2:27], na.rm = TRUE)
+col_means_aftercollapse = as.data.frame(col_means_aftercollapse)
+col_means_aftercollapse$cell_type <- rownames(col_means_aftercollapse)
+
+percent_detected_aftercollapse <- sapply(cell_type_collapse, function(col_name) {
+  sum(ciber_cells_collapse[[col_name]] != 0, na.rm = TRUE) / length(ciber_cells_collapse[[col_name]]) * 100
+})
+
+percent_detected_aftercollapse <- data.frame(
+  cell_type = cell_type_collapse,
+  percent_detected = percent_detected_aftercollapse
+) %>%
+  left_join(col_means_aftercollapse, by = "cell_type")
+
+percent_detected_aftercollapse$percent_detected[is.nan(percent_detected_aftercollapse$percent_detected)] <- 0
+
+percent_detected_aftercollapse <- percent_detected_aftercollapse %>%
+  arrange(percent_detected) %>%
+  dplyr::rename(mean_prop=col_means_aftercollapse) %>%
+  mutate(mean_percent = mean_prop * 100)
+
+# Save Percent Detected after Collapse
+#write_csv(percent_detected_aftercollapse, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CellTypes_PercentDetected_AfterCollapse_N635_sPTB_CANDLEGAPPS_122325.csv")
+```
+
+### Calculate percent detected based on PTB Status
+Here I will split the data into two subsets and separately evaluate percent detected
+```{r PTB STatus percent detected}
+# Split the Data by PTB Status
+PTB_Yes <- CANDLE_GAPPS_sPTB_FinalCovars %>%
+  dplyr::filter(PTB=="Yes")
+
+ciber_cells_PTBYes <- ciber_cells_collapse %>%
+  dplyr::filter(pathways_id %in% PTB_Yes$pathways_id)
+
+PTB_No <- CANDLE_GAPPS_sPTB_FinalCovars %>%
+  dplyr::filter(PTB=="No")
+
+ciber_cells_PTBNo <- ciber_cells_collapse %>%
+  dplyr::filter(pathways_id %in% PTB_No$pathways_id)
+
+#Percent Detected- PTB Yes
+
+col_means_PTBYes <- colMeans(ciber_cells_PTBYes[, 2:27], na.rm = TRUE)
+col_means_PTBYes <- as.data.frame(col_means_PTBYes)
+col_means_PTBYes$cell_type <- rownames(col_means_PTBYes)
+colnames(col_means_PTBYes)[1] <- "mean_prop"  # Rename column properly
+
+percent_detected_vals_PTBYes <- sapply(cell_type_collapse, function(col_name) {
+  sum(ciber_cells_PTBYes[[col_name]] != 0, na.rm = TRUE) / length(ciber_cells_PTBYes[[col_name]]) * 100
+})
+
+# Build final dataframe
+percent_detected_PTBYes <- data.frame(
+  cell_type = cell_type_collapse,
+  percent_detected = percent_detected_vals_PTBYes
+) %>%
+  left_join(col_means_PTBYes, by = "cell_type")
+
+percent_detected_PTBYes$percent_detected[is.nan(percent_detected_PTBYes$percent_detected)] <- 0
+
+percent_detected_PTBYes <- percent_detected_PTBYes %>%
+  arrange(percent_detected) %>%
+  mutate(mean_percent = mean_prop * 100)
+
+
+#Percent Detected- PTB No
+
+col_means_PTBNo <- colMeans(ciber_cells_PTBNo[, 2:27], na.rm = TRUE)
+col_means_PTBNo <- as.data.frame(col_means_PTBNo)
+col_means_PTBNo$cell_type <- rownames(col_means_PTBNo)
+colnames(col_means_PTBNo)[1] <- "mean_prop"  # Rename column properly
+
+percent_detected_vals_PTBNo <- sapply(cell_type_collapse, function(col_name) {
+  sum(ciber_cells_PTBNo[[col_name]] != 0, na.rm = TRUE) / length(ciber_cells_PTBNo[[col_name]]) * 100
+})
+
+# Build final dataframe
+percent_detected_PTBNo <- data.frame(
+  cell_type = cell_type_collapse,
+  percent_detected = percent_detected_vals_PTBNo
+) %>%
+  left_join(col_means_PTBNo, by = "cell_type")
+
+percent_detected_PTBNo$percent_detected[is.nan(percent_detected_PTBNo$percent_detected)] <- 0
+
+percent_detected_PTBNo <- percent_detected_PTBNo %>%
+  arrange(percent_detected) %>%
+  mutate(mean_percent = mean_prop * 100)
+
+#combine into one dataframe
+colnames(percent_detected_PTBYes) <-c( "Cell Type", "Percent Detected- Yes", "Mean Prop- Yes", "Mean Percent-Yes")
+colnames(percent_detected_PTBNo) <-c("Cell Type", "Percent Detected- No", "Mean Prop- No", "Mean Percent-No")
+PercentDetected_PTBStatus <- inner_join(percent_detected_PTBYes, percent_detected_PTBNo, by=c("Cell Type"))
+
+# Save Percent Detected
+#write_csv(PercentDetected_PTBStatus, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CellTypes_PercentDetected_N635_bysPTBStatus_CANDLEGAPPS_122325.csv")
+```
+
+### Calculate coefficienct of variation
+Going to calculate a coefficient of variation to see which cell types relative to their percent of the composition are most variable.
+```{r cell type variability}
+column_sd <- apply(ciber_cells_collapse[,2:27], 2, sd)
+
+column_mean <- apply(ciber_cells_collapse[,2:27], 2, mean)
+
+#CV calculate
+CV <- column_sd/column_mean
+print(CV)
+
+CV_df <- data.frame(CV)
+
+#write.csv(CV_df, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/CoefficientofVariation_N635_022526.csv")
+```
+
+### Calculate standard deviation
+Going to calculate the standard deviation for each cell type
+```{r cell type variability- SD}
+column_sd <- apply(ciber_cells_collapse[,2:27], 2, sd)
+
+print(column_sd)
+
+SD_df <- data.frame(column_sd)
+
+#write.csv(SD_df, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/StandardDeviation_CellProportions_N635_060826.csv")
+```
+
+### Remove low detection cell types
+Removing cell types that are detected in less than 20% of participants.
+```{r remove low detection cell types}
+# We remove cell types that are detected in less than 20% of participants. 
+less_than_20 = percent_detected_aftercollapse %>% 
+  filter(percent_detected<20) %>% 
+  pull(cell_type)
+
+#Combine covariates and cell proportions 
+data = ciber_cells_collapse %>% 
+  inner_join(CANDLE_GAPPS_sPTB_FinalCovars) %>% 
+  dplyr::select(-all_of(less_than_20))
+
+#Pull just the cell types with detection greater than 20%
+ciber_cells3 = ciber_cells_collapse %>% 
+  dplyr::select(-all_of(less_than_20), -pathways_id) 
+```
+
+### Plot Cell Proportions
+plot pre transformations and filtering
+```{r plot cell propostions}
+#Clean the input data and filter to only participants with full covariates (N=635)
+ciber_cells_long <-ciber_cells_collapse %>% 
+  pivot_longer(all_of(cell_type_collapse), names_to = "composition", 
+               values_to = "value")
+
+ciber_cells_long <- ciber_cells_long %>%
+  dplyr::filter(ciber_cells_long$pathways_id %in% CANDLE_GAPPS_sPTB_FinalCovars$pathways_id)
+
+
+ciber_cells_long = ciber_cells_long %>% 
+  mutate(composition = ifelse(composition %in% less_than_20, paste0(composition, " (<20%)"), composition))
+
+
+ciber_cells_long$composition <- gsub("_", " ", ciber_cells_long$composition) # remove underscores from cell type names
+
+#order based on most to least proportion fetal_syncytiotrophoblast (which is most abundant cell type)
+ordered_ids <- ciber_cells_long %>%
+  filter(composition == "fetal syncytiotrophoblast") %>%
+  arrange(desc(value)) %>%
+  pull(pathways_id)
+
+ciber_cells_long$pathways_id <- factor(ciber_cells_long$pathways_id, levels = ordered_ids)
+
+#order based on most to least prevalent cell types
+composition_order <- ciber_cells_long %>%
+  group_by(composition) %>% 
+  summarise(mean = mean(value, na.rm = T)) %>% 
+  arrange(desc(mean)) %>% 
+  pull(composition)
+
+# Reorder the composition column in the entire data based on the ordering
+ciber_cells_long$composition <- factor(ciber_cells_long$composition, levels = composition_order)
+
+p_all = ggplot(ciber_cells_long, aes(x = pathways_id, y = value, fill = composition)) +
+  geom_bar(stat = "identity", position = "stack", width = 1) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Participant", y = "Placental Cell Type Composition") +
+  theme_bw() +
+  scale_fill_viridis_d(option = "H") +
+  guides(fill = guide_legend(title = "Cell Type", ncol = 1)) +
+  scale_x_discrete(labels = function(x) {
+    index_vals <- seq(50, length(x), by = 50)  # hackey way to keep ordered factor
+    labels <- rep("", length(x))  # for pathways id while adding
+    labels[index_vals] <- as.character(index_vals)  # numbers to ticks
+    labels})
+  
+
+p_all
+
+```
+
+### Save Unimputed Data
+```{r save}
+ciber_cells3$pathways_id <- ciber_cells_collapse$pathways_id
+ciber_cells3 <- as.data.frame(ciber_cells3)
+rownames(ciber_cells3) <- ciber_cells3$pathways_id
+ciber_cells3 <- ciber_cells3 %>%
+  dplyr::select(-pathways_id)
+#save(ciber_cells3, file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/Filtered_CellProportions_AfterCollapse_NoImputations_N635_sPTB_122325.RData")
+```
+
+### Run Imputation and set detection limits
+```{r imputation and detection limits}
+# need detection limit. says to set to 0 for variables with no LOD problems. set to min detected for those with 0s, and 0 for those with no 0s....
+get_min_or_non_zero <- function(col) {
+  col_min <- min(col, na.rm = TRUE)
+  if (col_min == 0) {
+    # Get smallest non-zero value
+    non_zero_vals <- col[col != 0]
+    if (length(non_zero_vals) > 0) {
+      return(min(non_zero_vals, na.rm = TRUE))
+    } else {
+      return(0)  # In case there are no non-zero values, return 0
+    }
+  } else {
+    return(0)  # If the min is not 0, return 0
+  }
+}
+
+detection_limits <- apply(ciber_cells3, 2, get_min_or_non_zero)
+view(detection_limits)
+detection_limits<- unname(detection_limits)
+##### check a couple to make sure it worked.
+ciber_cells3 %>% filter(fetal_mesenchymal_stem_cells>0) %>% summarise(min = min(fetal_mesenchymal_stem_cells))
+ciber_cells3 %>% filter( fetal_naive_cd8_t_cells>0) %>% summarise(min = min( fetal_naive_cd8_t_cells))
+# fetal cytotrophoblasts has a non 0 min and was properly set to 0
+ciber_cells3 %>% summarise(min = min(fetal_cytotrophoblasts))
+
+# Run Imputation. 0s are imputed below the min detected value for each cell type.
+
+set.seed(2025)
+ciber_cells_impute = imputeBDLs(x = ciber_cells3, dl = detection_limits, maxit=50,eps=0.1,R=50,method="pls", variation=F)
+
+#save(ciber_cells_impute, file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/ciber_cells_imputationwithcollapse_N635_sPTB_122325.RData")
+
+# Read in the imputed data (to save time by not running again- current version 11/25/25)
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/ciber_cells_imputationwithcollapse_N635_sPTB_122325.RData")
+ciber_cells_impute_res = ciber_cells_impute$x
+
+# rows do not sum to 1 as expected. acomp() on the data will transform these in a relative manner so that they sum to 100%
+rowSums(ciber_cells_impute_res)
+
+# add back pathways_id
+ciber_cells_impute_res$pathways_id <- rownames(ciber_cells3)
+
+#Save Version with pathways IDs for regressions
+#save(ciber_cells_impute_res, file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/ImputedCellProportions_withCollapse_CANDLEGAPPS_N635_sPTB_122325.RData")
+
+```
+
+### Plot Cell Proportions after Imputation
+
+```{r plot after imputation}
+# reduce our cell_types variable to only include retained cell types
+cell_types <- colnames(ciber_cells_impute_res)[colnames(ciber_cells_impute_res) != "pathways_id"]
+
+# acomp is relative composition method, now all rows should sum to 1
+outcome <- compositions::acomp(ciber_cells_impute_res[,cell_types])
+rowSums(outcome)
+
+# this plots the imputed and transformed via acomp data
+ciber_cells_long <- as.data.frame(outcome)
+ciber_cells_long$pathways_id <-  rownames(ciber_cells3)
+ciber_cells_long <- ciber_cells_long %>% 
+  pivot_longer(all_of(cell_types), names_to = "composition", 
+               values_to = "value")
+#remove _ from cell types names
+ciber_cells_long$composition <- gsub("_", " ", ciber_cells_long$composition)
+
+#order based on most to least proportion fetal_syncytiotrophoblast
+ordered_ids <- ciber_cells_long %>%
+  filter(composition == "fetal syncytiotrophoblast") %>%
+  arrange(desc(value)) %>%
+  pull(pathways_id)
+
+ciber_cells_long$pathways_id <- factor(ciber_cells_long$pathways_id, levels = ordered_ids)
+
+#order based on most to least prevalent cell types
+composition_order <- ciber_cells_long %>%
+  group_by(composition) %>% 
+  summarise(mean = mean(value, na.rm = T)) %>% 
+  arrange(desc(mean)) %>% 
+  pull(composition)
+
+#save(composition_order, file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/composition_order_aftercollapse_N635_sPTB_122325.RData")
+
+# Reorder the composition column in the entire data based on the ordering
+ciber_cells_long$composition <- factor(ciber_cells_long$composition, levels = composition_order)
+
+
+p_filtered = ggplot(ciber_cells_long, aes(x = pathways_id, y = value, fill = composition)) +
+  geom_bar(stat = "identity", position = "stack", width = 1) +  # Ensures stacked bars with no gap
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Participant", y = "Placental Cell Type Composition") +
+  theme_bw() +
+  scale_fill_viridis_d(option = "H") +
+  guides(fill = guide_legend(title = "Cell Type"))+
+  scale_x_discrete(labels = function(x) {
+    index_vals <- seq(50, length(x), by = 50)  # hackey way to keep ordered factor
+    labels <- rep("", length(x))  # for pathways id while adding
+    labels[index_vals] <- as.character(index_vals)  # numbers to ticks
+    labels
+  })
+
+p_filtered
+
+```
+
+### Plot ordered by Cell Type Origin
+```{r plot cell ordered}
+cell_origin <- data.frame(
+  composition = composition_order,
+  origin = c(
+    "fetal",  # fetal syncytiotrophoblast
+    "fetal",  # fetal cytotrophoblasts
+    "maternal",  # maternal naive cd8 t cells
+    "fetal",  # fetal naive cd8 t cells
+    "maternal",  # maternal b cells
+    "fetal",  # fetal memory cd4 t cells
+    "maternal",  # maternal cd8 activated t cells
+    "fetal",  # fetal extravillous trophoblasts
+    "fetal",  # fetal Natural killer GZMB and GZMK
+    "fetal",  # fetal mesenchymal stem cells
+    "fetal",  # fetal cd14 monocytes
+    "fetal",  # fetal natural killer t cells
+    "fetal",  # fetal fibroblasts
+    "fetal",  # fetal nucleated red blood cells
+    "maternal",  # maternal natural killer cells
+    "fetal",  # fetal hofbauer cells
+    "fetal",  # fetal endothelial cells
+    "maternal",  # maternal fcgr3a monocytes
+    "maternal"   # maternal cd14 monocytes
+  )
+)
+
+#Combine with other data for plotting
+ciber_cells_long_2 <- ciber_cells_long %>%
+  left_join(cell_origin, by = "composition")
+
+ciber_cells_long_2$composition <- str_to_title(ciber_cells_long_2$composition)
+
+### Update cell type names for capitalization issues
+ciber_cells_long_2$composition <- ciber_cells_long_2$composition %>%
+  str_replace_all(c("Cd8" = "CD8+", 
+                    "Cd14" = "CD14+", 
+                    "Cd4" = "CD4+", 
+                    "T Cells" = "T-cells", 
+                    "B Cells" = "B-cells", 
+                    "Fcgr3a" = "FCGR3A", 
+                    "Gzmk"= "GzmK+", 
+                    "Gzmb"="GzmB+"))
+
+#Reorder data for plotting
+composition_order_by_origin <- ciber_cells_long_2 %>%
+  group_by(origin, composition) %>%
+  summarise(mean_value = mean(value, na.rm = TRUE)) %>%
+  arrange(origin, desc(mean_value)) %>%
+  pull(composition)
+
+ciber_cells_long_2$composition <- factor(ciber_cells_long_2$composition, levels = composition_order_by_origin)
+
+#Plot with ordering by maternal vs fetal origin
+
+p_filtered_origin = ggplot(ciber_cells_long_2, aes(x = pathways_id, y = value, fill = composition)) +
+  geom_bar(stat = "identity", position = "stack", width = 1) +  # Ensures stacked bars with no gap
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Participant", y = "Placental Cell Type Composition") +
+  theme_bw() +
+  scale_fill_viridis_d(option = "H") +
+  guides(fill = guide_legend(title = "Cell Type"))+
+  scale_x_discrete(labels = function(x) {
+    index_vals <- seq(50, length(x), by = 50)  # hackey way to keep ordered factor
+    labels <- rep("", length(x))  # for pathways id while adding
+    labels[index_vals] <- as.character(index_vals)  # numbers to ticks
+    labels
+  })
+
+p_filtered_origin
+```
+
+### Histogram of Cell Type Values
+Checking that Cells types meet beta regression requirements 
+```{r cell type histograms}
+composition_order_underscores <- gsub(" ", "_", composition_order)
+data_long2 <- data %>%
+  pivot_longer(cols = all_of(cell_types), names_to = "cell_type", values_to = "value")%>%
+  mutate(cell_type = factor(cell_type, levels = composition_order_underscores))
+ggplot(data_long2, aes(x = value)) +
+  geom_histogram(bins = 30, fill = "blue", alpha = 0.7) +
+  facet_wrap(~cell_type, scales = "free") +
+  theme_minimal() +
+  labs(title = "Histogram of Cell Type Values",
+       x = "Value",
+       y = "Count")
+
+# double check that all cell types satisfy betaregression (0,1) distribution, no values of 1 or 0
+data_long2 %>% filter(value == 1)
+data_long2 %>% filter(value == 0)
+data_long2 %>% filter(value > 1)
+data_long2 %>% filter(value < 0)
+```
+
+
+

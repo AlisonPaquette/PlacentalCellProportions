@@ -1,0 +1,156 @@
+---
+title: "RNAseq_Processing_Filtering"
+author: "Samantha Lapehn"
+date: "2025-11-21"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## RNAseq Processing and Filtering for Birthweight Z-Score Transcriptome w/Cell Proportions Analysis
+
+This code performs processing and filtering of the CANDLE and PATHWAYS GAPPS placental transcriptome data for the cell proportions project where we are seeing if adjusting for cell proportions in a DEG analysis changes the outcome. 
+
+### Load Packages
+```{r load packages}
+library(tidyverse)
+library(edgeR)
+```
+
+### Load Data
+Load RNAseq Data and Exposure/Covariate data which may be needed for model construction
+```{r Load Data}
+#Loading CANDLE/GAPPS RNAseq Data
+load(file="/Volumes/paquette_a/slapehn/OPE_and_PlacentalTranscriptome/Data/CANDLE_RNAseq/candle_20200226.Rdata")
+load(file="/Volumes/paquette_a/GAPPSGrant_PrelimData/Resubmission_July2024/NEW_RawData/gapps_20240325.Rdata")
+gapps_lengthScaledTPM <- lengthScaledTPM
+
+#Loading the covariates for the N=1009 CANDLE/GAPPS Datasets
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_111825.RData")
+```
+
+### Pull Count Data & Combine Cohorts
+Using length scaled TPM values
+```{r count data}
+LS_Counts_candle <- data.frame(candle_lengthScaledTPM$counts)
+LS_Counts_gapps <- data.frame(gapps_lengthScaledTPM$counts)
+
+#Combine cohorts
+check <-rownames(LS_Counts_candle)==rownames(LS_Counts_gapps)
+sum(check)
+identical(rownames(LS_Counts_candle), rownames(LS_Counts_gapps))
+LS_Counts <- cbind(LS_Counts_candle, LS_Counts_gapps)
+```
+
+# Filtering
+- 1. Remove participants that don't have full covariate data
+-2. Removed Enzembl IDs with the suffix "_PAR_Y"  
+- 3. Remove non-protein coding genes
+- 4. Performed Filtering on genes with mean cpm<0  
+- 5. Removed Duplicated Genes  
+- 6. TMM Normalization 
+
+```{r filtering}
+#Original Dimensions
+dim(LS_Counts)
+dim(annot)
+
+#Remove participants that don't have full covariate data
+LS_Counts <- LS_Counts %>%
+  dplyr::select(any_of(CANDLE_GAPPS_FinalCovars$pathways_id))
+
+#Dimensions after filtering for full covariates
+dim(LS_Counts)
+
+#Remove Ensembl IDs with the suffix "_PAR_Y"
+LS_Counts<-LS_Counts[!grepl("_PAR_Y",rownames(LS_Counts)),]
+annot$ENSEMBL<-as.character(annot$ENSEMBL)
+annot<-annot[!grepl("_PAR_Y",annot$ENSEMBL),]
+
+#Dimsenions after "_PAR_Y" removal
+dim(LS_Counts)
+dim(annot)
+
+#get rownames of count dataset to match annot$ENSEMBL by removing the "." and 
+# everything after it
+rownames(LS_Counts)<-gsub("\\..*","",rownames(LS_Counts))
+
+#Remove non-protein coding genes
+BiotypesToKeep<-c("protein_coding")
+GenesToKeep<-NA
+for(i in 1:length(BiotypesToKeep)){
+  GenesToKeep=c(GenesToKeep,annot[which(annot$BIOTYPE==BiotypesToKeep[i]),"ENSEMBL"])
+}
+annot<-annot[which(annot$ENSEMBL%in%GenesToKeep),]
+table(annot$BIOTYPE)
+
+LS_Counts<-LS_Counts[which(rownames(LS_Counts)%in%GenesToKeep),]
+
+#Dimensions after reducing to protein-coding genes
+dim(LS_Counts)
+dim(annot)
+
+#Remove genes with low expression
+#Keep genes with average log cpm>0
+logcpm<-cpm(LS_Counts,log=T)
+
+keep<-rowMeans(logcpm)>0
+summary(keep)
+
+logcpm_filt <- logcpm[keep,]
+LS_Counts_filt<-LS_Counts[keep,]
+annot<-annot[keep,]
+
+#Plot before and after filtering out low expressing genes
+
+plot(density(logcpm),main="Before Removing low expressing genes")#,xlim=c(-10,20000))
+abline(v =0, col = "red", lty = 2)
+
+plot(density(logcpm_filt),main="After Removing low expressing genes")#,xlim=c(-10,20000))
+abline(v =0, col = "red", lty = 2)
+
+#Dimensions after low expresion filtering
+dim(LS_Counts_filt)
+dim(annot)
+dim(logcpm_filt)
+
+#Remove duplicated genes
+summary(duplicated(logcpm_filt))
+
+dupgenes<-as.character(annot[annot$ENSEMBL%in%rownames(logcpm_filt)[duplicated(logcpm_filt)],"SYMBOL"])
+dupgenes
+
+annot<-annot[-which(annot$SYMBOL%in%dupgenes),]
+logcpm_filt<-logcpm_filt[-which(duplicated(logcpm_filt)),]
+LS_Counts_filt<-LS_Counts_filt[-which(duplicated(LS_Counts_filt)),]
+
+#Dimensions after removing duplicates
+dim(LS_Counts_filt)
+dim(logcpm_filt)
+dim(annot)
+
+```
+
+### TMM Normalization
+Perform TMM normalization on filtered counts
+```{r TMM Norm}
+#Make DGEList
+Y<- DGEList(counts=LS_Counts_filt, genes = annot$SYMBOL)
+
+Y_norm<-calcNormFactors(Y,method="TMM") #This is the Default Method
+
+#Plot before and after normalization
+boxplot(cpm(Y,log=T)[,1:10], main="Before Normalization")
+
+boxplot(cpm(Y_norm,log=T)[,1:10], main="After Normalization")
+```
+
+### Save filtered/normalized data
+```{r save}
+#save(Y_norm, annot, file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/FilteredNormalized_RNAseq_CANDLEGAPPS_N1009_112125.RData")
+```
+

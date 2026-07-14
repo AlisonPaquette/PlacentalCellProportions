@@ -1,0 +1,128 @@
+---
+title: "CellProportions_SummaryForestPlot"
+author: "Samantha Lapehn"
+date: "2026-02-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Placental Cell Proportions- Summary Forest Plot
+
+This code will combine all of the results from each outcome/model type to create a comprehensive forest plot that allows for comparison across groups.
+
+### Load Packages
+```{r load packages}
+library(tidyverse)
+library(pheatmap)
+```
+
+### Load Data
+```{r load data}
+BWadj <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/PlacentalEfficiency/BWadj_N166_CombinedResults_020926.csv")
+BWPW <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/PlacentalEfficiency/BWPW_N166_CombinedResults_020926.csv")
+BWZ <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BW_ZScore/BirthweightZ_CombinedResults_N1009_020926.csv")
+GestAge <-read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/GestationalAge/GestationalAge_CombinedResults_N1009_020926.csv")
+sPTB <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_N635_CombinedResults_020926.csv")
+```
+
+### Combine Data
+```{r combine data}
+#Add a column for each outcome
+BWadj$Outcome <- c("BWadj N=166")
+BWPW$Outcome <- c("BW:PW N=166")
+BWZ$Outcome <- c("BW Z-Score N=1009")
+GestAge$Outcome <- c("Gestational Age N=1009")
+sPTB$Outcome <- c("sPTB N=635")
+
+#Combine into one dataframe
+AllData <- rbind(BWadj, BWPW, BWZ, GestAge, sPTB)
+
+#Fix some formatting issues
+AllData$CellType <- gsub("Gzmb", "GzmB+", AllData$CellType)
+AllData$CellType <- gsub("Gzmk", "GzmK+", AllData$CellType)
+AllData$CellType <- gsub("Cd4", "CD4+", AllData$CellType)
+AllData$CellType <- gsub("Cd8", "CD8+", AllData$CellType)
+AllData$CellType <- gsub("Cd14", "CD14+", AllData$CellType)
+AllData$CellType <- gsub("Fcgr3a", "FCGR3A", AllData$CellType)
+AllData$CellType <- gsub("T Cells", "T-cells", AllData$CellType)
+AllData$CellType <- gsub("B Cells", "B-cells", AllData$CellType)
+#Make subtypes to sort the cell types by: 
+print(unique(AllData$CellType))
+AllData <- AllData %>%
+  mutate(
+    CellCategory = recode(CellType,
+      "Fetal Syncytiotrophoblast"      = "Trophoblast",
+      "Fetal Cytotrophoblasts"          = "Trophoblast",
+      "Fetal Extravillous Trophoblasts" = "Trophoblast",
+      "Fetal Hofbauer Cells"                 = "Fetal Immune",
+      "Fetal Endothelial Cells"              = "Fetal Other",
+      "Fetal Fibroblasts"                  = "Fetal Other",
+      "Fetal Nucleated Red Blood Cells"                  = "Fetal Other",
+      "Fetal Natural Killer GzmB+ GzmK+"                  = "Fetal Immune",
+      "Fetal Naive CD8+ T-cells"                 = "Fetal Immune", 
+      
+    "Fetal Memory CD4+ T-cells" = "Fetal Immune", 
+    "Fetal CD14+ Monocytes" = "Fetal Immune", 
+    "Maternal Naive CD8+ T-cells" = "Maternal Immune", 
+    "Maternal FCGR3A Monocytes" = "Maternal Immune", 
+    "Maternal CD8+ Activated T-cells" = "Maternal Immune", 
+    "Maternal B-cells" = "Maternal Immune"
+    )
+  )
+
+AllData <- AllData %>%
+  mutate(OrderVar = as.numeric(factor(CellCategory)))
+
+#Make the Categories appear in a specific order
+AllData <- AllData %>%
+  mutate(
+    CategoryOrder = recode(CellCategory,
+      "Trophoblast" = 3,
+      "Fetal Other"    = 4,
+      "Fetal Immune"     = 2,  
+      "Maternal Immune"      = 1), 
+)
+#Order cell types
+AllData$CellType <- reorder(AllData$CellType, AllData$CategoryOrder)
+
+#Remove dirichlet results since we arne't going to include those
+AllData <- AllData %>%
+  dplyr::filter(RegressionType != "Dirichlet Regression")
+
+#Sort the Regression Types so that Bootstrap is first then Beta Regression last
+
+AllData <- AllData %>%
+  mutate(
+    RegressionType = factor(RegressionType, 
+                            levels = c("Bootstrap Composition", 
+                                       "Beta Regression"),
+                            #Names to display on the plot
+                            labels = c("Bootstrap Composition", 
+                                       "Beta Regression"))
+  )
+```
+
+### Forest Plot
+```{r forest plot}
+
+#All Together
+  ggplot(AllData, aes(x =Estimate, y = CellType, color = RegressionType)) +
+  geom_point(position = position_dodge(width = 0.6), size = 3) +
+  geom_errorbar(aes(xmin = CI_Low, xmax =CI_High),
+                 position = position_dodge(width = 0.6), height = 0.3) +
+  facet_wrap(~Outcome, scales = "free_x", nrow=1) +
+  theme_bw() +
+  labs(x = "Percent Change and 95% Confidence Interval", color = "Estimate Type") +
+  theme(axis.text.y = element_text(size = 10)) +
+  geom_vline(xintercept=0, col="black", linetype="dashed") + 
+  theme(
+  panel.spacing.x = unit(1, "lines")
+) +
+  ylab("")
+
+```

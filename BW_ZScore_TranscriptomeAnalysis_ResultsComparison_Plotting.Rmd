@@ -1,0 +1,81 @@
+---
+title: "BW_Z-Score TranscriptomeAnalysis _ResultsComparison"
+author: "Samantha Lapehn"
+date: "2026-06-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Birthweight Z-Score and Placental Transcriptome- Results Comparison
+
+This code will compare the results of the Birthweight Z-Score and Placental Transcriptome Analysis that is part of the Cell Proportions project in CANDLE/PATHWAYS GAPPS N=1009. Here I ran the BW Z-Score -> Transcriptome analysis 3 ways. All covariates were kept the same except for treatment of cell proportions: 
+
+1) Birthweight
+2) Birthweight + All Cell Types - 1 (Leave one out compositional regression)
+3) Birthweight + Cell Proportions PCA (PCs >5% variance included=7)
+
+### Load Packages
+```{r packages}
+library(tidyverse)
+library(ggvenn)
+library(UpSetR)
+```
+
+### Load Data
+Loading Differentially expressed genes (FDR<0.05) for each model
+```{r load data}
+BW <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BirthweightTranscriptome/BWz_DEGS_FDR<0.05_noCellProp_112125.csv")
+BW_CellProp_LOO <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BirthweightTranscriptome/BWz_DEGS_FDR<0.05_CellProp_060926.csv")
+BW_PCA <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BirthweightTranscriptome/BWz_DEGS_FDR<0.05_CellPropPCA_112125.csv")
+```
+
+### Upset Plot
+```{r upset plot}
+List_noSVA <- list("Birthweight"=BW$genes, "Birthweight w/Cell Prop"=BW_CellProp_LOO$genes, "Birthweight w/Cell Prop PCs"=BW_PCA$genes)
+upset(fromList(List_noSVA))
+```
+
+### Make a Venn Diagram
+Since we're only comparing three groups- I'll also make a venn diagram here as another option.
+```{r VD diagram}
+library(ggvenn)
+ggvenn(List_noSVA, show_percentage = FALSE, set_name_size=5, text_size=6, fill_color=c("#0080A2", "gray", "#EC7625"))
+```
+
+### Heatmap
+Note: 
+```{r heatmap}
+FullResults <- full_join(BW, BW_CellProp_LOO, by=c("genes"), suffix=c("_BW", "_CellProp")) 
+FullResults2 <- full_join(FullResults, BW_PCA, by=c("genes"))
+FullResultsFinal <- FullResults2 %>%
+  dplyr::select(genes, logFC_BW, logFC_CellProp, logFC)
+
+rownames(FullResultsFinal) <- FullResultsFinal$genes
+FullResultsFinal <- FullResultsFinal %>%
+  dplyr::select(-genes)
+colnames(FullResultsFinal) <- c("BW", "BW + Cell Prop", "BW + Cell Prop PCs") 
+#Sort
+row_means <- rowMeans(FullResultsFinal, na.rm=TRUE)
+FullResults_forheatmap <- FullResultsFinal[order(row_means) , ]
+
+
+ library(pheatmap)
+pheatmap(
+  t(FullResults_forheatmap),
+  scale = "none",         
+  cluster_rows = TRUE,    
+  cluster_cols = FALSE,    
+  show_rownames = TRUE,   
+  show_colnames = TRUE,   
+  color = colorRampPalette(c("#0080A2", "white", "#EC7625"))(100), 
+  na.col="grey", 
+  fontsize_col=2,
+  cellheight=20
+)
+```
+

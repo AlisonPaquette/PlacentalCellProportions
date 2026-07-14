@@ -1,0 +1,363 @@
+---
+title: "sPTB_CellProportions_Models"
+author: "Samantha Lapehn and Brennan Baker"
+date: "2026-02-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## sPTB and Cell Proportions
+
+Here we are performing several models to evaluate the association between spontaneous preterm birth (sPTB) and placental cell proportions in the CANDLE and PATHWAYS GAPPS cohorts (N=635). We are modelling this with three methods: Composition Model, Bootstrapped Composition Model, and Beta Regressions. 
+
+### Upload Data and Load Packages
+```{r data and packages}
+#Load Packages
+library(tidyverse)
+library(janitor)
+library(compositions)
+library(robCompositions)
+library(data.table)
+library(parallel)
+library(betareg)
+library(foreach)
+library(marginaleffects)
+
+#Load Data
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/ImputedCellProportions_withCollapse_CANDLEGAPPS_N635_sPTB_122325.RData")
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_sPTB_122325.RData")
+percent_detected <-read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CellTypes_PercentDetected_AfterCollapse_N635_sPTB_CANDLEGAPPS_122325.csv")
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/composition_order_aftercollapse_N635_sPTB_122325.RData")
+```
+
+### Prepare Data and Check Covariates
+```{r prep data and check covariates}
+# add cell type data to covariate data.
+data = ciber_cells_impute_res %>%  
+  inner_join(CANDLE_GAPPS_sPTB_FinalCovars)
+#Check Data types
+summary(data)
+
+```
+
+### sPTB and Cell Proportions- Composition Models
+These models are evaluating the association between sPTB and Cell Proportions (relative proportion), but do not give p-values for individual cell types.
+
+```{r sPTB and cell prop}
+# reduce our cell_types variable to only include retained cell types
+cell_types <- colnames(ciber_cells_impute_res)[colnames(ciber_cells_impute_res) != "pathways_id"]
+
+# acomp is relative composition method, now all rows should sum to 1
+outcome <- compositions::acomp(ciber_cells_impute_res[,cell_types])
+rowSums(outcome)
+
+# ilr:() is the Isometric log ratio transformation
+comp_mod <- lm(ilr(outcome) ~ Age + BMI + EducationCollapsed  + RaceCollapsed + Ethnicity + FetalSex + Parity + LaborStatus + DeliveryMethod + SmokingComposite + Alcohol + Batch + PTB, data=data)
+
+# extract coefficients in inverse-ILR scale
+compositions::ilrInv(coef(comp_mod), orig=outcome)
+
+# extract pvalue associated with preterm birth
+anova(comp_mod)['PTB',6] ## Significant association!
+
+```
+
+### sPTB and Cell Proportions- Bootstrapping
+These models evaluate sPTB and cell proprotions and have p-values for each individual cell type.
+```{r sPTB and cell prop - bootstrapping}
+
+expected_names <- c(cell_types, "Fstat") 
+nboot = 1000 # number of bootstrap repetitions
+no_cores = detectCores() - 1 # number of computer cores to use for parallel loop 
+cl <- makeCluster(no_cores) # create parallel backend
+# Make results reproducible across runs
+clusterSetRNGStream(cl, 123)
+
+clusterEvalQ(cl, {
+  library(compositions)
+  library(data.table)
+  library(parallel)
+})
+
+clusterExport(cl, varlist = c("nboot", "data", "cell_types"))
+
+tmp <- parLapplyLB(cl, 1:nboot, function(b) {
+  
+  # Sample with replacement
+  rep_idx <- sample(seq_len(nrow(data)), size = nrow(data), replace = TRUE)
+  boot_data <- data[rep_idx, ]
+  
+  # Compositional outcome for bootstrap sample
+  outcome_b <- acomp(boot_data[, cell_types])
+  
+  # Fit model
+  comp_mod_b <- lm(ilr(outcome_b) ~ Age + BMI + Education + Race + Ethnicity + 
+                     FetalSex + Parity + LaborStatus + DeliveryMethod + SmokingComposite + Alcohol + Batch + PTB, data = boot_data)
+  
+  # Create PTB=No and PTB=Yes datasets
+  new_no  <- boot_data; new_no$PTB  <- factor("No",  levels = levels(boot_data$PTB))
+  new_yes <- boot_data; new_yes$PTB <- factor("Yes", levels = levels(boot_data$PTB))
+  
+  # Predict in ILR space
+  pred_ilr_no  <- predict(comp_mod_b, newdata = new_no)
+  pred_ilr_yes <- predict(comp_mod_b, newdata = new_yes)
+  
+  # Back-transform row-by-row into composition space- Updating this code to be more precise for bootstrapping
+  basis <- ilrBase(outcome_b)
+  
+  #comp_no  <- t(apply(pred_ilr_no,  1, ilrInv, orig = outcome_b))
+  #comp_yes <- t(apply(pred_ilr_yes, 1, ilrInv, orig = outcome_b))
+  
+  comp_no  <- t(apply(pred_ilr_no,  1, ilrInv, V = basis))
+comp_yes <- t(apply(pred_ilr_yes, 1, ilrInv, V = basis))
+
+colnames(comp_no)  <- cell_types
+colnames(comp_yes) <- cell_types
+  
+  # Average across subjects → marginal predicted compositions
+  dt_no  <- as.data.table(as.list(colMeans(comp_no)))
+  dt_yes <- as.data.table(as.list(colMeans(comp_yes)))
+  
+  list(PTB_No = dt_no, PTB_Yes = dt_yes)
+})
+
+stopCluster(cl)
+
+# Combine into data.tables
+boot_no  <- rbindlist(lapply(tmp, function(x) x$PTB_No))
+boot_yes <- rbindlist(lapply(tmp, function(x) x$PTB_Yes))
+
+# Get column names (cell types)
+cell_types_boot <- colnames(boot_no)
+
+# Point estimates (means)
+mean_no  <- colMeans(boot_no)
+mean_yes <- colMeans(boot_yes)
+
+estimates <- data.frame(
+  CellType = cell_types_boot,
+  PTB_No = mean_no,
+  PTB_Yes = mean_yes,
+  row.names = NULL
+)
+
+#Calculate percent difference in mean cell composition by PTB Status: Positive percent= higher in PTB
+estimates$percent_diff <- 100 * (estimates$PTB_Yes - estimates$PTB_No) / estimates$PTB_No
+#Display Composition as Percentages
+estimates$PTB_No_Percent <- estimates$PTB_No * 100
+estimates$PTB_Yes_Percent <- estimates$PTB_Yes * 100
+
+# Confidence intervals
+ci_no  <- apply(boot_no, 2, quantile, probs = c(0.025, 0.975))
+ci_yes <- apply(boot_yes, 2, quantile, probs = c(0.025, 0.975))
+
+# Format into separate dataframe
+ci_df <- data.frame(
+  CellType = cell_types,
+  CI_No_Low = ci_no[1, ],
+  CI_No_High = ci_no[2, ],
+  CI_Yes_Low = ci_yes[1, ],
+  CI_Yes_High = ci_yes[2, ],
+  row.names = NULL
+)
+
+ci_diff <- apply(boot_yes - boot_no, 2, quantile, probs = c(0.025, 0.975))
+
+sig_flags <- (ci_diff[1, ] > 0 & ci_diff[2, ] > 0) | (ci_diff[1, ] < 0 & ci_diff[2, ] < 0)
+
+significance_df <- data.frame(
+  CellType = colnames(boot_no),
+  Diff_Low = ci_diff[1, ],
+  Diff_High = ci_diff[2, ],
+  Significant = ifelse(sig_flags, "yes", "no")
+)
+#Combine all REsults into one summary table
+
+BootstrapSummary <- cbind(estimates, ci_df, significance_df)
+BootstrapSummary <- BootstrapSummary %>%
+  dplyr::select(-CellType, -PTB_No, -PTB_Yes)
+
+BootstrapSummary$PTB_No_Percent <- format(BootstrapSummary$PTB_No_Percent, scientific = FALSE)
+BootstrapSummary$PTB_Yes_Percent <- format(BootstrapSummary$PTB_Yes_Percent, scientific = FALSE)
+BootstrapSummary$CellType <-rownames(BootstrapSummary)
+
+BootstrapSummary$RelativeComparison <- 
+    (as.numeric(BootstrapSummary$PTB_Yes_Percent) / 100) /
+    (as.numeric(BootstrapSummary$PTB_No_Percent) / 100)
+
+#Add confidence intervals
+ci_ratio <- apply(boot_yes / boot_no, 2, quantile, probs = c(0.025, 0.975))
+
+# Add these to your BootstrapSummary
+BootstrapSummary$Ratio_CI_Low <- ci_ratio[1, ]
+BootstrapSummary$Ratio_CI_High <- ci_ratio[2, ]
+
+#We also want to include an absolute summary- calculating that here
+BootstrapSummary$AbsoluteDiff <- (as.numeric(BootstrapSummary$PTB_Yes_Percent) - 
+                                  as.numeric(BootstrapSummary$PTB_No_Percent))
+
+BootstrapSummary$Abs_CI_Low  <- ci_diff[1, ] * 100
+BootstrapSummary$Abs_CI_High <- ci_diff[2, ] * 100
+
+#write_csv(BootstrapSummary, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_CellProportions_BootstrapResults_N635_020926.csv")
+```
+
+### Beta-Regression
+Here we model each cell type individually not accounting for the composition overall.
+```{r beta regression}
+library(betareg)
+library(broom)
+library(dplyr)
+library(foreach)
+
+betareg_sPTB <- foreach(i = cell_types, .combine = "rbind") %do% {
+  result <- tryCatch({
+    formula_i <- as.formula(
+      paste0(i,  "~ PTB + Age + BMI + EducationCollapsed + RaceCollapsed + Ethnicity + FetalSex + Parity + LaborStatus + DeliveryMethod + SmokingComposite + Alcohol + Batch")
+    )
+    
+    model <- betareg(formula_i, data = data)
+    
+    # Get effect for PTBYes
+    tidy_model <- broom::tidy(model, conf.int = TRUE) %>% 
+      filter(term == "PTBYes") %>%
+      mutate(
+        estimate = exp(estimate),
+        conf.low = exp(conf.low),
+        conf.high = exp(conf.high),
+        estimate_with_ci = paste0(round(estimate, 3), " [", round(conf.low, 3), " to ", round(conf.high, 3), "]"),
+        significant = ifelse(p.value < 0.05, "yes", "no"),
+        cell_type = i
+      ) %>%
+      dplyr::select(cell_type, term, estimate, std.error, p.value, conf.low, conf.high, estimate_with_ci, significant)
+    
+    # Get expected marginal means for PTB = Yes/No
+    preds <- data %>%
+      dplyr::select(PTB, Age, BMI, EducationCollapsed, RaceCollapsed, Ethnicity, FetalSex, Parity, LaborStatus, DeliveryMethod, SmokingComposite, Alcohol, Batch) %>%
+      mutate(PTB = factor(PTB, levels = c("No", "Yes")))  # ensure proper level order
+    
+    preds$fit <- predict(model, newdata = preds, type = "response")
+    
+    ptb_means <- preds %>%
+      group_by(PTB) %>%
+      summarise(fitted = mean(fit)) %>%
+      pivot_wider(names_from = PTB, values_from = fitted, names_prefix = "PTB_") %>%
+      mutate(cell_type = i)
+    
+    # Join both effects
+    left_join(tidy_model, ptb_means, by = "cell_type")
+
+  }, error = function(e) {
+  warning(paste("Error for cell type:", i, "->", e$message))
+    data.frame(
+      cell_type = i,
+      term = "PTBYes",
+      estimate = NA,
+      std.error = NA,
+      p.value = NA,
+      conf.low = NA,
+      conf.high = NA,
+      estimate_with_ci = "Error",
+      significant = "Error",
+      PTB_No = NA,
+      PTB_Yes = NA
+    )
+  })
+  
+  return(result)
+}
+
+#Marginal Effects code
+# list of the cell types where the beta regression did not fail
+cell_types2 = betareg_sPTB %>% filter(estimate !="Error") %>% pull(cell_type)
+
+ame_df <- foreach(i = cell_types2, .combine = "rbind") %do% {
+
+  formula_i <- as.formula(
+    paste0(i,  "~ PTB + Age + BMI + EducationCollapsed + RaceCollapsed + Ethnicity + FetalSex + Parity + LaborStatus + DeliveryMethod + SmokingComposite + Alcohol + Batch")
+    )
+  
+  model <- betareg(formula_i, data = data)
+  # avg_slopes used for 1 unit increase in contin exposure. avg_comparisons used for binary exposure variable like PTB
+  avg_comparisons(
+    model,
+    variables = "PTB",
+    newdata = data,
+    type = "response"
+  ) %>%
+    as_tibble() %>%
+    rename_with(~ paste0("ame_", .x)) %>%
+    mutate(cell_type = i)
+}
+
+composition_order_underscore <-gsub(" ", "_", composition_order)
+
+# SCALE BY 100 HERE: transforms proportion (0.01) to percentage points (1.0)
+ame_df <- ame_df %>%
+  dplyr::mutate(
+      ame_estimate_percent = ame_estimate * 100,
+      ame_conf.low_percent = ame_conf.low * 100,
+      ame_conf.high_percent = ame_conf.high * 100
+    )
+
+betareg_sPTB <- betareg_sPTB %>%
+  left_join(ame_df)%>%
+  mutate(cell_type = factor(cell_types, levels = composition_order_underscore)) %>%
+  arrange(cell_type) %>%
+  left_join(percent_detected, by = "cell_type")
+
+#write_csv(betareg_sPTB, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_CellProportions_BetaRegressionResults_N635_020926.csv")
+```
+
+### Compare across Regression Types
+```{r compare}
+#Pull Sig Cell Types
+Sig_Boot <- BootstrapSummary %>%
+  dplyr::filter(Significant=="yes") %>%
+  dplyr::select(CellType, AbsoluteDiff, Abs_CI_Low, Abs_CI_High)
+Sig_Boot$RegressionType <- c("Bootstrap Composition")
+colnames(Sig_Boot) <- c("CellType", "Estimate", "CI_Low", "CI_High", "RegressionType")
+
+Sig_Beta <- betareg_sPTB %>%
+  dplyr::filter(significant=="yes") %>%
+  dplyr::select(cell_type, ame_estimate_percent, ame_conf.low_percent, ame_conf.high_percent)
+Sig_Beta$RegressionType <- c("Beta Regression")
+colnames(Sig_Beta) <- c("CellType", "Estimate", "CI_Low", "CI_High", "RegressionType")
+
+# Combine
+CombinedResults <- rbind(Sig_Boot, Sig_Beta)
+
+#Fix Formatting of Cell Types
+CombinedResults$CellType <- gsub("_", " ", CombinedResults$CellType)
+CombinedResults$CellType <- str_to_title(CombinedResults$CellType)
+
+#Fix Estimate Data Class
+class(CombinedResults$Estimate)
+CombinedResults$Estimate <- as.numeric(CombinedResults$Estimate)
+class(CombinedResults$Estimate)
+
+# Plot for easy visualization
+ggplot(CombinedResults, aes(x=RegressionType, y=CellType, fill=Estimate)) +
+  geom_point(shape=21, size=4) +
+  theme_bw() +
+  scale_fill_gradient2(
+    low = "#0080A2",
+    mid = "white",
+    high = "#EC7625",
+    midpoint = 0  
+  ) + 
+  ggtitle("sPTB- N=635")
+
+rownames(CombinedResults) <- NULL
+
+#Save Combined Results
+#write.csv(CombinedResults, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_N635_CombinedResults_020926.csv")
+```
+
+
+

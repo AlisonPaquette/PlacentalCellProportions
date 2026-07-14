@@ -1,0 +1,402 @@
+---
+title: "BWzscore_CellProportions_Models"
+author: "Samantha Lapehn & Brennan Baker"
+date: "2026-02-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Birthweight Z-Score and Cell Proportions
+
+Here we are performing several models to evaluate the association between birthweight z-score and placental cell proportions in the CANDLE and PATHWAYS GAPPS cohorts (N=1009). We are modelling this with several methods: Composition Model, Bootstrapped Composition Model, and Beta Regressions.
+
+### Upload Data and Load Packages
+```{r data and packages}
+#Load Packages
+library(tidyverse)
+library(janitor)
+library(compositions)
+library(robCompositions)
+library(data.table)
+library(parallel)
+library(betareg)
+library(foreach)
+library(DirichletReg)
+library(marginaleffects)
+
+#Load Data
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/ImputedCellProportions_withcollapse_CANDLEGAPPS_N1009_111825.RData")
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_111825.RData")
+percent_detected <-read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CellTypes_PercentDetected_AfterCollapse_N1009_CANDLEGAPPS_111825.csv")
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/composition_order_aftercollapse_111825.RData")
+```
+
+### Prepare Data and Check Covariates
+```{r prep data and check covariates}
+# add cell type data to covariate data.
+data = ciber_cells_impute_res %>%  
+  inner_join(CANDLE_GAPPS_FinalCovars)
+#Check Data types
+summary(data)
+#All variables look good- but ethnicity, fetal sex, and parity have empty factor levels
+data$Ethnicity <- factor(data$Ethnicity, levels=c("0", "1"))
+data$FetalSex <- factor(data$FetalSex, levels=c("F", "M"))
+data$Parity <- factor(data$Parity, levels=c("0", "1"))
+data$RaceCollapsed <- factor(data$RaceCollapsed, levels=c("1", "2", "3", "6", "7"))
+data$Batch <- factor(data$Batch, levels=c("1", "2", "3", "4", "5", "6", "7"))
+summary(data)
+
+
+composition_order_underscores <-gsub(" ", "_", composition_order)
+```
+
+### Birthweight and Cell Proportions- Composition Models
+These models are evaluating the association between Birthweight and Cell Proportions (relative proportion), but do not give p-values for individual cell types. 
+
+```{r BW and cell prop}
+# reduce our cell_types variable to only include retained cell types
+cell_types <- colnames(ciber_cells_impute_res)[colnames(ciber_cells_impute_res) != "pathways_id"]
+
+# acomp is relative composition method, now all rows should sum to 1
+outcome <- compositions::acomp(ciber_cells_impute_res[,cell_types])
+rowSums(outcome)
+
+# ilr:() is the Isometric log ratio transformation
+comp_mod <- lm(ilr(outcome) ~ Age + BMI + EducationCollapsed  + RaceCollapsed + Ethnicity + FetalSex + Parity + LaborType + DeliveryMethod + SmokingComposite + Alcohol + Batch + bw_z, data=data)
+
+# extract coefficients in inverse-ILR scale
+compositions::ilrInv(coef(comp_mod), orig=outcome)
+
+# extract pvalue associated with gestational week
+anova(comp_mod)['bw_z',6] ## Significant association!
+
+## NOTE: One of the limitations of the 'compositions' package is that the 
+##       p-value calculation is only correct for the last covariate in the 
+##       model formula.  
+##       In this example, the p-value for "bw_z" is correct, but not 
+##       for infant sex. In order to calculate the correct p-value for "sex", 
+##       you need to refit the same model with "sex" at the end of the formula: 
+##      --> "ilr(outcome) ~ gestation_wk + sex"
+## Reference: for further details, see Section 5.3.5 of Van den Boogaart,
+##            Tolsana and Delgado (2013).
+
+# perturbation applied to the composition if X increases one unit 
+# ilrINV brings the coefs back to the original scale. Demonstrations of this transformation from the 
+# source above (authors of the compositions package)
+ga_coef <- compositions::ilrInv(coef(comp_mod), orig=outcome)['bw_z',]
+# taking the mean of all participant compositions with this perturbation applied
+# in a relative composition manner (cell types sum to 1 even after taking mean)
+exp_ccomp <- mean(compositions::acomp(ga_coef) + outcome)
+exp_ccomp
+
+sum(ga_coef)
+#rowSums(outcome)
+sum(exp_ccomp)
+
+# calculate expected change in cell proportions for 1 unit increase in bw-zscore
+# this is the difference between the mean of all participants with the 
+# beta coefficient change (perturbation) applied from above, and the mean of the actual composition 
+# of all participants. See https://clinicalepigeneticsjournal.biomedcentral.com/articles/10.1186/s13148-023-01601-x for similar method 
+exp_change <- as.numeric(exp_ccomp) - as.numeric(mean(outcome))
+names(exp_change) <- names(outcome)
+exp_change
+
+
+# can multiple each one by 100 for a percent change
+exp_change_percent <- exp_change *100
+exp_change_percent
+
+# also get relative effect (ratio). Easier to compare with beta regression effect estimates
+exp_change_relative <- as.numeric(exp_ccomp) / as.numeric(mean(outcome))
+names(exp_change_relative) <- names(outcome)
+exp_change_relative
+
+#Combine Expected Change to one dataframe
+
+ExpChange_DF <- data.frame(exp_change,exp_change_percent, exp_change_relative)
+
+#write.csv(ExpChange_DF, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BW_ZScore/Birthweight_CompModel_ExpectedChange_020926.csv")
+
+```
+
+### Birthweight and Cell Proporstions- Bootstrapping
+These models evaluate birthweight and cell proprotions and have p-values for each individual cell type.
+```{r BW and cell prop - bootstrapping}
+################################################################################
+# (3) Bootstrap approach to estimate confidence intervals and corrected p-value
+#     for the effect of increasing birthweight Z-score by 1 unit on placenta cell
+#     type composition.
+################################################################################
+nboot = 1000 # number of bootstrap repetitions
+no_cores = detectCores() - 1 # number of computer cores to use for parallel loop 
+cl <- makeCluster(no_cores) # create parallel backend
+clusterSetRNGStream(cl, 123) # Set seed for reproducibility
+clusterEvalQ(cl, {
+  library(compositions)
+  library(data.table)
+  library(parallel)
+})
+
+clusterExport(cl, varlist = c("nboot","data","cell_types"))
+
+# parallel loop that runs compositional regressions for each bootstrap data set and stores results
+tmp = parLapplyLB(cl,1:nboot,function(b){
+  
+  # sample from original data with replacement
+  rep_idx <- sample(x=1:nrow(data), size=nrow(data), replace=T)
+  boot_data <- data[rep_idx,]
+  
+  # perform analysis on bootstrap data and save estimates
+  outcome_b = acomp(boot_data[,cell_types]) # this is the cell types, like outcome in the above example, but only for this bootstrapped sample
+
+  # fit compositional model on current bootstrap data
+  comp_mod_b <- lm(ilr(outcome_b) ~ Age + BMI + EducationCollapsed  + RaceCollapsed + Ethnicity + FetalSex + Parity + LaborType + DeliveryMethod + SmokingComposite + Alcohol + Batch + bw_z, data=boot_data)
+  
+  # extract F statistic (only used for the overal p-value)
+  Fstat_b = anova(comp_mod_b)['bw_z', 3]
+  
+  # extract exposure coefficient in inverse ILR scale
+  # the reason we are bootstrapping is to get 95% CIs for these, each individual cell types effect on BW Z-Score.
+  # a single composition model only gives you p values for the effect of the entire composition 
+  #coef_b <- ilrInv(coef(comp_mod_b), orig=outcome_b)['bw_z',] This is the previous version that is not quite right for bootstrap since hte outcome_b can change in each bootstrap iteration
+  
+  basis <- ilrBase(outcome_b)
+coef_b <- ilrInv(coef(comp_mod_b), V = basis)['bw_z',]
+  
+  # calculate the expected cell composition after 1 unit increase in exposure
+  # for each participant we are adding the coef for a 1 week increase to their actual cell type.
+  # the addition is in a relative composition way, not Euclidean space. Adding two acomp class objects, each participants composition will still sum to one.
+  exp_outcome = mean(acomp(coef_b) + outcome_b)
+  
+  # expected change in cell composition after 1 unit increase in exposure (original scale)
+  exp_outcome_change = as.numeric(exp_outcome) - as.numeric(mean(outcome_b))
+  
+  ## we also need to boostrap relative percent chance, rather than absolute changes to compare with beta regression
+  # because beta regression uses logit link and is multiplicative
+  exp_outcome_relative_change = as.numeric(exp_outcome) / as.numeric(mean(outcome_b))
+  
+  # store results
+  dt <- data.table(t(exp_outcome_change), 
+                   Fstat = Fstat_b)
+
+  dt.relative = data.table(t(exp_outcome_relative_change), 
+                   Fstat = Fstat_b)
+  res = list(dt=dt,dt.relative=dt.relative)
+})
+stopCluster(cl) # stop parallel backend
+
+
+# Extract dt (absolute changes) from all bootstrap iterations
+bootstrap_results <- rbindlist(lapply(tmp, function(x) x$dt))
+colnames(bootstrap_results)[1:length(cell_types)] <- cell_types
+
+# calculate 95% bootstrap Confidence intervals.
+# -20 removed the Fstat col from this
+boot_CIs <- as.data.frame(apply(bootstrap_results[,-20], 2, 
+                              quantile, probs=c(0.025,0.975)))
+
+# get df for p values
+get_df = summary(comp_mod)$"Response Y1"$fstatistic
+get_df["numdf"]
+get_df["dendf"]
+# calculate bootstrap corrected p-value using the median F-statistic 
+# p value for the entire compositional effect.
+boot_pvalue <- pf(median(bootstrap_results$Fstat), get_df["numdf"], get_df["dendf"], lower.tail=F)
+print(boot_pvalue)
+
+# original estimate from exp_change. This is the estimate we are bootstrapping 95% CIs around
+exp_change_original = as.data.frame(exp_change)
+exp_change_original$cell_type <- rownames(exp_change_original)
+boot_CIs = t(boot_CIs) %>% as.data.frame()
+boot_CIs$cell_type <- rownames(boot_CIs)
+
+final_res = exp_change_original %>% left_join(boot_CIs) %>% 
+  mutate(overall_composition_p_value=boot_pvalue) %>% 
+  dplyr::rename(conf.low = "2.5%",
+                conf.high = "97.5%")%>% 
+  mutate(exp_change = exp_change*100, # multiply by 100 to get % instead of proportion
+         conf.low = conf.low*100,
+         conf.high= conf.high*100) %>% 
+    mutate(estimate_with_ci = paste0(
+    round(exp_change, 3), " [", round(conf.low, 3), " to ", round(conf.high, 3), "]")) %>% 
+  dplyr::select(cell_type, exp_change, conf.low, conf.high, estimate_with_ci, overall_composition_p_value)%>%
+  mutate(significant = if_else(
+    sign(exp_change) == sign(conf.low) & sign(exp_change) == sign(conf.high),  # Check if all signs are the same to evaluate significance
+    "yes", 
+    "no"
+  ))
+
+final_res=final_res%>%
+  mutate(cell_type = factor(cell_type, levels = composition_order_underscores)) %>%
+  arrange(cell_type)
+
+#write_csv(final_res, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BW_ZScore/Birthweight_CellProportions_BootstrapResults_N1009_020926.csv")
+
+###
+#### same thing but for multiplicative changes
+####
+
+# Extract dt (relative changes) from all bootstrap iterations
+bootstrap_results <- rbindlist(lapply(tmp, function(x) x$dt.relative))
+colnames(bootstrap_results)[1:length(cell_types)] <- cell_types
+colnames(bootstrap_results)[length(cell_types) + 1] <- "Fstat"
+
+# calculate 95% bootstrap Confidence intervals.
+boot_CIs <- as.data.frame(apply(bootstrap_results, 2, 
+                              quantile, probs=c(0.025,0.975)))
+
+# get df for p values (not really needed, same p-value as above)
+get_df = summary(comp_mod)$"Response Y1"$fstatistic
+get_df["numdf"]
+get_df["dendf"]
+
+exp_change_original = as.data.frame(exp_change_relative)
+exp_change_original$cell_type <- rownames(exp_change_original)
+boot_CIs = t(boot_CIs) %>% as.data.frame()
+boot_CIs$cell_type <- rownames(boot_CIs)
+
+final_res_relative = exp_change_original %>% left_join(boot_CIs) %>% 
+  dplyr::rename(conf.low = "2.5%",
+                conf.high = "97.5%")%>%  
+    mutate(estimate_with_ci = paste0(
+    round(exp_change_relative, 3), " [", round(conf.low, 3), " to ", round(conf.high, 3), "]")) %>% 
+  dplyr::select(cell_type, exp_change_relative, conf.low, conf.high, estimate_with_ci)%>%
+  mutate(significant = if_else(
+    (exp_change_relative > 1 & conf.low > 1 & conf.high > 1) | (exp_change_relative < 1 & conf.low < 1 & conf.high < 1), 
+    "yes", 
+    "no"))
+final_res_relative=final_res_relative%>%
+  mutate(cell_type = factor(cell_type, levels = composition_order_underscores)) %>%
+  arrange(cell_type)
+
+
+#write_csv(final_res_relative, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BW_ZScore/Birthweight_CellProportions_BootstrapResults_Multiplicative_N1009_020926.csv")
+```
+
+### Birthweight and Cell Proportions- Beta Regression
+The Beta regressions model each cell type 1 at a time (without accounting for other cell types). The outcome is a proportion between 0-1. 
+```{r BW Beta regressions}
+
+# for cell types with low detection and generally low proportions, we get this error:
+# Error in chol.default(K) : the leading minor of order 2 is not positive
+# this loop allows errors and reports them in the final results
+
+betareg_bw <- foreach(i = cell_types, .combine = "rbind") %do% {
+  result <- tryCatch({
+    b1 <- betareg(paste0(i,  "~ bw_z +  Age + BMI + EducationCollapsed +  RaceCollapsed + Ethnicity + FetalSex + Parity + LaborType + DeliveryMethod + SmokingComposite + Alcohol + Batch"), 
+                  data = data)
+    
+    broom::tidy(b1, conf.int = TRUE) %>% 
+      mutate(estimate = exp(estimate),
+             conf.low = exp(conf.low),
+             conf.high = exp(conf.high)) %>% 
+      mutate(estimate_with_ci = paste0(
+        round(estimate, 3), " [", round(conf.low, 3), " to ", round(conf.high, 3), "]")) %>% 
+      filter(term == "bw_z") %>% 
+      mutate(significant = ifelse(p.value < 0.05, "yes", "no")) %>%
+      mutate(cell_type = i) %>% 
+      dplyr::select(cell_type, term, estimate, std.error, p.value, conf.low, conf.high, estimate_with_ci, significant)
+  }, error = function(e) {
+    data.frame(
+      cell_type = i,
+      term = "bw_z",
+      estimate = "Error",
+      std.error = "Error",
+      p.value = "Error",
+      conf.low = "Error",
+      conf.high = "Error",
+      estimate_with_ci = "Error",
+      significant = "Error"
+    )
+  })
+  
+  return(result)
+}
+
+### Marginal Effects Code
+# list of the cell types where the beta regression did not fail
+cell_types2 = betareg_bw %>% filter(estimate != "Error") %>% pull(cell_type)
+
+ame_df <- foreach(i = cell_types2, .combine = "rbind") %do% {
+
+  formula_i <- as.formula(
+    paste0(i,  "~ bw_z +  Age + BMI + EducationCollapsed +  RaceCollapsed + Ethnicity + FetalSex + Parity + LaborType + DeliveryMethod + SmokingComposite + Alcohol + Batch")
+    )
+  
+  model <- betareg(formula_i, data = data)
+  # avg_slopes used for 1 unit increase in continuous exposure. avg_comparisons used for binary exposure variable like PTB
+  avg_slopes(
+    model,
+    variables = "bw_z",
+    newdata = data,
+    type = "response"
+  ) %>%
+    as_tibble() %>%
+    rename_with(~ paste0("ame_", .x)) %>%
+    mutate(cell_type = i)
+}
+
+ # SCALE BY 100 HERE: transforms proportion (0.01) to percentage points (1.0)
+ame_df <- ame_df %>%
+  dplyr::mutate(
+      ame_estimate_percent = ame_estimate * 100,
+      ame_conf.low_percent = ame_conf.low * 100,
+      ame_conf.high_percent = ame_conf.high * 100
+    )
+
+
+betareg_bw = betareg_bw%>%
+  left_join(ame_df) %>% 
+  mutate(cell_type = factor(cell_type, levels = composition_order_underscores)) %>%
+  arrange(cell_type) %>% left_join(percent_detected)
+
+betareg_bw 
+
+#write_csv(betareg_bw, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BW_ZScore/Birthweight_BetaRegressionResults_N1009_020926.csv")
+```
+
+### Compare across Regression Types
+```{r compare}
+#Pull Sig Cell Types
+Sig_Boot <- final_res %>%
+  dplyr::filter(significant=="yes") %>%
+  dplyr::select(cell_type, exp_change, conf.low, conf.high)
+Sig_Boot$RegressionType <- c("Bootstrap Composition")
+colnames(Sig_Boot) <- c("CellType", "Estimate", "CI_Low", "CI_High", "RegressionType")
+
+Sig_Beta <- betareg_bw %>%
+  dplyr::filter(significant=="yes") %>%
+  dplyr::select(cell_type, ame_estimate_percent, ame_conf.low_percent, ame_conf.high_percent)
+Sig_Beta$RegressionType <- c("Beta Regression")
+colnames(Sig_Beta) <- c("CellType", "Estimate", "CI_Low", "CI_High", "RegressionType")
+
+
+# Combine
+CombinedResults <- rbind(Sig_Boot, Sig_Beta)
+
+#Fix Formatting of Cell Types
+CombinedResults$CellType <- gsub("_", " ", CombinedResults$CellType)
+CombinedResults$CellType <- str_to_title(CombinedResults$CellType)
+
+#Fix Estimate Data Class
+class(CombinedResults$Estimate)
+CombinedResults$Estimate <- as.numeric(CombinedResults$Estimate)
+class(CombinedResults$Estimate)
+
+# Plot for easy visualization
+ggplot(CombinedResults, aes(x=RegressionType, y=CellType, fill=Estimate)) +
+  geom_point(shape=21, size=4) +
+  theme_bw() +
+  scale_fill_gradient2(low="#0080A2", mid="white", high="#EC7625", midpoint=0) + 
+  ggtitle("Birthweight- ZScores")
+
+#Save Combined Results
+#write.csv(CombinedResults, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/BW_ZScore/BirthweightZ_CombinedResults_N1009_020926.csv")
+```
+
+

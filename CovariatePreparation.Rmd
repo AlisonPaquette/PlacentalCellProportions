@@ -1,0 +1,773 @@
+---
+title: "CovariatePreparation"
+author: "Samantha Lapehn Young"
+date: "2025-12-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## CANDLE & GAPPS: Covariate Harmonization and Cleaning
+
+This code performs Covariate harmonization and cleaning for CANDLE and PATHWAYS GAPPS cohorts to use in the Cell Proportions project evaluating placental cell proportions with birth outcomes (sPTB, GA, BW z-score, BW:PW, BWadj).
+
+### Load Packages
+```{r load packages, results=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(growthstandards)
+```
+
+### Load Covariate Data
+The older GAPPS covar version has gravidity and prenatl alochol
+```{r load data}
+gapps_covars <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/gapps_covariates_042524.csv")
+candle_covars <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/p0108_CANDLECovariates.csv")
+old_candle_covar <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/p0075_PAH_CANDLE_covariates.csv")
+old_gapps_covar<-read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/p0047_gapps_older.csv")
+
+CANDLE_Covariates3 <- read.csv("/Volumes/paquette_a/PWG_Methylome_GrantPrep_2026/CANDLEData/p0047_candle_fromMariana_miRNA.csv") #Use this for chorio preeclampsia, etc
+
+gapps_AJOGvars <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/AdditionalGAPPsPerinatalData_FromAJOG2023/p0047_gapps_addition.csv") #Use this for cervical insufficiency
+
+```
+
+### Get RNAseq Batch Information
+```{r batch organization}
+#Load RNAseq Data to pull batch information
+load(file="/Volumes/paquette_a/slapehn/OPE_and_PlacentalTranscriptome/Data/CANDLE_RNAseq/candle_20200226.Rdata")
+candle_batch <- batches
+candle_batch$pathways_id<-colnames(candle_lengthScaledTPM$counts)
+candle_batch <- candle_batch %>%
+  dplyr::select(pathways_id, Analysis)
+colnames(candle_batch) <- c("pathways_id", "batch")
+load(file="/Volumes/paquette_a/GAPPSGrant_PrelimData/Resubmission_July2024/NEW_RawData/gapps_20240325.Rdata")
+gapps_batch <- batches
+gapps_batch$pathways_id<-colnames(lengthScaledTPM$counts)
+gapps_batch <- gapps_batch %>%
+  dplyr::select(pathways_id, Analysis)
+colnames(gapps_batch) <- c("pathways_id", "original_batch")
+
+
+#Change GAPPS batch to 5-8 so that it doesn't match CANDLE
+#Note: there are some duplicate samples that were run in two batches. In previous GAPPS analysis we removed those from the 4th batch based on this note from the Code ("remove the duplicates in the fourth batch for now (arrange by batch, ## then take only the first sample)")- Here I will do the same thing and remove the duplicates from the 4th batch.
+gapps_batch <- gapps_batch[!(duplicated(gapps_batch$pathways_id) & gapps_batch$original_batch == 4), ]
+summary(as.factor(gapps_batch$original_batch))
+gapps_batch$batch <- recode(gapps_batch$original_batch, `1` = 5, `2` = 6, `3` = 7, `4` = 8)
+summary(as.factor(gapps_batch$batch))
+```
+
+
+### Filter each dataset for the covariates that we need
+Maternal Age: h_m_delivery_age (continuous) - need to pull from "old CANDLE" covars
+
+Maternal Pre-pregnancy BMI: h_m_prepreg_bmi (continuous) 
+
+Maternal Education: h_m_enroll_educ (factor)
+
+Maternal Income: h_enroll_income (factor) - need to pull from older CANDLE covars 
+
+Maternal Race: h_m_race (factor) 
+
+Maternal Ethnicity: h_m_ethn  (factor) 
+
+Fetal Sex: h_c_sex (factor)   
+
+Parity: h_firstborn - will treat as a factor with two levels (primiparous, multiparous). 
+
+Labor Type: cg_labor_type (factor) 
+
+Delivery Method: h_del_method (factor) 
+
+Smoking: Will combine h_m_enroll_smoke (factor) and cotinine (Y/N) into a new smoking composite variable which is Yes if either self-report or cotinine is positive.
+
+Self-Report Alcohol: h_m_alcohol_prenatal (CANDLE-factor), m_pn_alc 
+
+Gestational Age at Birth: h_birth_gestage_wks (CANDLE-continuous), h_birth_gestage. 
+(GAPPS-continuous)
+
+Birthweight: h_birthweight_g 
+
+Placental Abruption (to use for exclusion): h_placental_abrupt
+
+Placental weight: m_pl1_weight, mpl2_weight (continous) (GAPPS only!) 
+
+Study Site: (categorical)
+
+RNA sequencing batch: (categorical)- accounts for the fact that deconvolution was built off RNAseq data. The batch variable that we want to use is batches$Analysis
+
+```{r select covars of interest}
+#CANDLE
+candle_main_selected_covars <- candle_covars %>%
+  dplyr::select(pathways_id, h_m_prepreg_bmi, h_m_enroll_educ, h_m_race, h_m_ethn, h_c_sex, h_firstborn, cg_labor_type, h_del_method, h_m_enroll_smoke, h_m_alcohol_prenatal, h_birth_gestage_wks, h_birthweight_g, h_placental_abrupt)
+#Add study site to CANDLE since it's only one site (Memphis)
+candle_main_selected_covars$site <- c("Memphis")
+
+#GAPPS
+#missing gravidity and alcohol (will pull from other gapps covars)
+#Adding h_multi_gest which I'll need to use for filtering in Gapps only
+gapps_main_selected_covars <- gapps_covars %>%
+  dplyr::select(pathways_id, h_m_delivery_age, h_m_prepreg_bmi, h_m_enroll_educ, h_m_race, h_m_ethn, h_c_sex, h_firstborn, cg_labor_type, h_del_method, h_m_enroll_smoke, h_birth_gestage, h_birthweight_g, h_placental_abrupt,  m_pl1_weight, m_pl2_weight, site, h_multi_gest)
+
+#Old GAPPS
+#need to pull gravidity and alcohol, and sPTB filtering criteria
+oldgapps_selected_covars <- old_gapps_covar %>%
+  dplyr::select(pathways_id, m_pn_alc, m_chorio_currpreg, m_preeclam, pprom_currpreg)
+
+gapps_AJOG_selected <- gapps_AJOGvars %>%
+  dplyr::select(pathways_id, m_category___9) #Cervical insufficiency
+
+#Combine GAPPS covar sets
+gapps_selected_covars <- full_join(gapps_main_selected_covars, oldgapps_selected_covars, by=c("pathways_id"))
+
+gapps_selected_covars <- full_join(gapps_selected_covars, gapps_AJOG_selected, by=c("pathways_id"))
+
+#Old CANDLE
+#need to pull income
+oldcandle_selected_covars <- old_candle_covar %>%
+  dplyr::select(pathways_id, h_m_delivery_age)
+
+#CANDLE Covar 3- pull sPTB filtering variables
+CANDLE_missingcovars2 <- CANDLE_Covariates3 %>%
+  dplyr::select(pathways_id, m_chorio, m_preeclam, m1mb_chtn, m1mb_chtn2, ld_gesthtn4, ld_cshtn, ld_mhtn, pprom_currpreg)
+
+#Combine CANDLE covar sets
+candle_selected_covars <- inner_join(candle_main_selected_covars, oldcandle_selected_covars, by=c("pathways_id"))
+
+candle_selected_covars <- inner_join(candle_selected_covars, CANDLE_missingcovars2, by=c("pathways_id"))
+
+#Add batch to each dataset
+candle_selected_covars<- inner_join(candle_selected_covars, candle_batch,by=c("pathways_id"))
+gapps_selected_covars <- inner_join(gapps_selected_covars, gapps_batch, by=c("pathways_id"))
+gapps_selected_covars <- gapps_selected_covars %>%
+  dplyr::select(-original_batch)
+
+#Fix GAPPS study site
+summary(as.factor(gapps_selected_covars$site))
+gapps_selected_covars$site <- recode(gapps_selected_covars$site, `10` = "Seattle", `11` = "Seattle", `12` = "Yakima")
+summary(as.factor(gapps_selected_covars$site))
+
+```
+
+### Fix 8888 Variables
+Some variables are coded as 8888 which means "prefer not to respond"- these will be recoded as NAs.
+```{r fix 8888}
+
+candle_selected_covars[candle_selected_covars == 8888 | candle_selected_covars == "8888"] <- NA
+
+
+#check one var with 8888 before and after
+summary(as.factor(gapps_selected_covars$h_m_race))
+gapps_selected_covars[gapps_selected_covars == 8888 | gapps_selected_covars == "8888"] <- NA
+summary(as.factor(gapps_selected_covars$h_m_race))
+```
+
+### Update Variable Types
+Turn categorical variables into factors
+```{r update variable}
+#CANDLE
+candle_selected_covars$h_m_enroll_educ <- as.factor(candle_selected_covars$h_m_enroll_educ)
+candle_selected_covars$h_m_race <- as.factor(candle_selected_covars$h_m_race)
+candle_selected_covars$h_c_sex <- as.factor(candle_selected_covars$h_c_sex)
+candle_selected_covars$cg_labor_type <- as.factor(candle_selected_covars$cg_labor_type)
+candle_selected_covars$h_del_method <- as.factor(candle_selected_covars$h_del_method)
+candle_selected_covars$h_m_enroll_smoke <- as.factor(candle_selected_covars$h_m_enroll_smoke)
+candle_selected_covars$h_m_alcohol_prenatal <- as.factor(candle_selected_covars$h_m_alcohol_prenatal)
+candle_selected_covars$h_placental_abrupt <- as.factor(candle_selected_covars$h_placental_abrupt)
+candle_selected_covars$h_m_ethn <- as.factor(candle_selected_covars$h_m_ethn)
+candle_selected_covars$h_firstborn <- as.factor(candle_selected_covars$h_firstborn)
+candle_selected_covars$batch <- as.factor(candle_selected_covars$batch)
+candle_selected_covars$site <- as.factor(candle_selected_covars$site)
+candle_selected_covars$m_chorio <- as.factor(candle_selected_covars$m_chorio)
+candle_selected_covars$m_preeclam <- as.factor(candle_selected_covars$m_preeclam)
+candle_selected_covars$m1mb_chtn <- as.factor(candle_selected_covars$m1mb_chtn)
+candle_selected_covars$m1mb_chtn2 <- as.factor(candle_selected_covars$m1mb_chtn2)
+candle_selected_covars$ld_gesthtn4 <- as.factor(candle_selected_covars$ld_gesthtn4)
+candle_selected_covars$ld_cshtn <- as.factor(candle_selected_covars$ld_cshtn)
+candle_selected_covars$ld_mhtn <- as.factor(candle_selected_covars$ld_mhtn)
+candle_selected_covars$pprom_currpreg <- as.factor(candle_selected_covars$pprom_currpreg)
+
+
+#GAPPS
+gapps_selected_covars$h_m_enroll_educ <- as.factor(gapps_selected_covars$h_m_enroll_educ)
+gapps_selected_covars$h_m_race <- as.factor(gapps_selected_covars$h_m_race)
+gapps_selected_covars$h_c_sex <- as.factor(gapps_selected_covars$h_c_sex)
+gapps_selected_covars$cg_labor_type <- as.factor(gapps_selected_covars$cg_labor_type)
+gapps_selected_covars$h_del_method <- as.factor(gapps_selected_covars$h_del_method)
+gapps_selected_covars$h_m_enroll_smoke <- as.factor(gapps_selected_covars$h_m_enroll_smoke)
+gapps_selected_covars$m_pn_alc <- as.factor(gapps_selected_covars$m_pn_alc)
+gapps_selected_covars$h_placental_abrupt <- as.factor(gapps_selected_covars$h_placental_abrupt)
+gapps_selected_covars$h_m_ethn <- as.factor(gapps_selected_covars$h_m_ethn)
+gapps_selected_covars$h_firstborn <- as.factor(gapps_selected_covars$h_firstborn)
+gapps_selected_covars$batch <- as.factor(gapps_selected_covars$batch)
+gapps_selected_covars$site <- as.factor(gapps_selected_covars$site)
+gapps_selected_covars$h_multi_gest <- as.factor(gapps_selected_covars$h_multi_gest)
+gapps_selected_covars$m_chorio_currpreg <- as.factor(gapps_selected_covars$m_chorio_currpreg)
+gapps_selected_covars$m_preeclam <- as.factor(gapps_selected_covars$m_preeclam)
+gapps_selected_covars$m_category___9 <- as.factor(gapps_selected_covars$m_category___9)
+gapps_selected_covars$pprom_currpreg <- as.factor(gapps_selected_covars$pprom_currpreg)
+
+```
+
+### Summarize covariates
+Summarize to make sure everything looks right before performing filtering
+```{r summarize preliminary}
+summary(candle_selected_covars)
+summary(gapps_selected_covars)
+```
+
+### Remove multiple gestations and placental abruptions
+CANDLE only has singletons. We will remove placental abruption from both cohorts here too.
+```{r remove exclusion critera}
+#GAPPS
+dim(gapps_selected_covars) #465
+gapps_afterexclusion<- gapps_selected_covars %>%
+  dplyr::filter(h_multi_gest==0|is.na(h_multi_gest)) %>% #452 after removing multiple gestatons
+  dplyr::filter(h_placental_abrupt==0|is.na(h_placental_abrupt)) %>% #438 after removing placental abruption
+  dplyr::select(-h_multi_gest, -h_placental_abrupt)
+dim(gapps_afterexclusion)
+
+#CANDLE
+dim(candle_selected_covars) #465
+candle_afterexclusion <- candle_selected_covars %>%
+  dplyr::filter(h_placental_abrupt==0|is.na(h_placental_abrupt)) %>% #788 after removing placental abruption
+  dplyr::select( -h_placental_abrupt)
+dim(candle_afterexclusion)
+
+```
+
+### Organize Data for Combining
+Make sure column names are shared
+```{r organize}
+
+# Add Cohort Marker
+candle_afterexclusion$Cohort <- c("CANDLE")
+gapps_afterexclusion$Cohort <- c("GAPPS")
+#Harmonize column names
+colnames(candle_afterexclusion) <- c("pathways_id","BMI", "Education", "Race", "Ethnicity", "FetalSex", "Parity", "LaborType", "DeliveryMethod", "Smoking", "Alcohol", "GestAgeWks", "Birthweight", "Site", "Age", "m_chorio", "m_preeclam", "m1mb_chtn", "m1mb_chtn2", "ld_gesthtn4", "ld_cshtn", "ld_mhtn", "pprom_currpreg", "Batch", "Cohort")
+
+
+colnames(gapps_afterexclusion) <- c("pathways_id", "Age", "BMI", "Education", "Race", "Ethnicity", "FetalSex", "Parity", "LaborType", "DeliveryMethod", "Smoking", "GestAgeDays", "Birthweight","PlacentalWeight1", "PlacentalWeight2", "Site", "Alcohol", "m_chorio_currpreg", "m_preeclam", "pprom_currpreg", "m_category___9", "Batch", "Cohort")
+
+#Harmonize gstational age variables by having weeks and days option for each cohort
+candle_afterexclusion$GestAgeDays <- (candle_afterexclusion$GestAgeWks)*7
+gapps_afterexclusion$GestAgeWks <- (gapps_afterexclusion$GestAgeDays)/7
+
+#Remove covariates that won't be needed for the BW and GestAGe analysis in combined CANDLE+ GAPPS. We'll revisit these covariates for other analyses
+gapps_covars_forcombining <- gapps_afterexclusion %>%
+  dplyr::select(-PlacentalWeight1, -PlacentalWeight2, -m_chorio_currpreg, -m_preeclam,-pprom_currpreg, -m_category___9)
+
+candle_covars_forcombining <- candle_afterexclusion %>%
+  dplyr::select(-m_chorio, -m_preeclam, -m1mb_chtn, -m1mb_chtn2, -ld_gesthtn4, -ld_cshtn, -ld_mhtn, -pprom_currpreg)
+
+#Reorder GAPPS Columns to Match CANDLE
+sum(colnames(gapps_covars_forcombining)==colnames(candle_covars_forcombining))
+sum(colnames(gapps_covars_forcombining) %in% colnames(candle_covars_forcombining))
+gapps_covars_forcombining <- gapps_covars_forcombining[, colnames(candle_covars_forcombining)]
+sum(colnames(gapps_covars_forcombining)==colnames(candle_covars_forcombining))
+```
+
+### Combine CANDLE and GAPPS Data
+```{r combine cohorts}
+CANDLE_GAPPS_Covars <- rbind(candle_covars_forcombining, gapps_covars_forcombining)
+CANDLE_GAPPS_Covars$Cohort <- as.factor(CANDLE_GAPPS_Covars$Cohort)
+summary(CANDLE_GAPPS_Covars)
+```
+
+### GAPPS Only: Fix Placental Weight Vars and Remove NAs
+There are a small number of GAPPS participants with two placental weight measurements. Will take the average for those participants. Note that only GAPPS has placental weight data. 
+```{r placental weight}
+#Grab samples with two weights
+placentalweight_problems <- gapps_afterexclusion %>%
+  dplyr::select(pathways_id, PlacentalWeight1, PlacentalWeight2) %>%
+  dplyr::filter(PlacentalWeight1 != "NA" & PlacentalWeight2 !="NA")
+#Take average
+placentalweight_problems$AvgPlacentalWeight <- ((placentalweight_problems$PlacentalWeight1+ placentalweight_problems$PlacentalWeight2)/2)
+#Pull pathways ID of problems samples
+prob_PW <- placentalweight_problems$pathways_id
+
+#Remove old weights
+placentalweight_problems <- placentalweight_problems %>%
+  dplyr::select(pathways_id, AvgPlacentalWeight)
+colnames(placentalweight_problems) <- c("pathways_id", "PlacentalWeight")
+
+#Pull PW1
+placentalweight <- gapps_afterexclusion %>%
+  dplyr::select(pathways_id, PlacentalWeight1) %>%
+  dplyr::filter(! pathways_id %in% prob_PW)
+colnames(placentalweight) <- c("pathways_id", "PlacentalWeight")
+
+#New PW
+new_PW <-rbind(placentalweight, placentalweight_problems)
+summary(new_PW$PlacentalWeight)
+
+# Prepare other variables to readd new_PW
+gapps_forPlacentalEfficiency <- gapps_afterexclusion %>%
+  dplyr::select(-PlacentalWeight1, -PlacentalWeight2, -m_chorio_currpreg, -m_preeclam,-pprom_currpreg, -m_category___9) #no longer need the old placenta weight variables, also removing some fo the variables needed for the sPTB analysis
+gapps_forPlacentalEfficiency <- full_join(gapps_forPlacentalEfficiency, new_PW, by=c("pathways_id"))
+dim(gapps_forPlacentalEfficiency)
+```
+
+### Remove Participants with Missing Data
+-Remove participants with missing data. Only participants with complete covariates will be retained.
+```{r exclusion}
+dim(CANDLE_GAPPS_Covars)
+CANDLE_GAPPS_Covars <- CANDLE_GAPPS_Covars %>%
+  na.omit()
+sum(is.na(CANDLE_GAPPS_Covars))
+dim(CANDLE_GAPPS_Covars)
+summary(CANDLE_GAPPS_Covars$Cohort)
+
+#GAPPS only Covariates (for BW/PW analyess)- NAs already removed above
+dim(gapps_forPlacentalEfficiency)
+gapps_forPlacentalEfficiency <- gapps_forPlacentalEfficiency %>% 
+  na.omit()
+dim(gapps_forPlacentalEfficiency)
+```
+
+### Load Exposure/Proportion Data to Cross Check
+Need to ensure that these participants have: 
+Cell Proportions Data (Derived from RNAseq Data)
+```{r load extra data}
+CibersortResults <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/FromBrennan/Data/CIBERSORTx_Job8_Results.csv")
+```
+
+### Check for Deconvolution Data Overlap
+```{r deconvo overlap}
+#Combined CANDLE/GAPPS
+sum(CANDLE_GAPPS_Covars$pathways_id %in% CibersortResults$Mixture)
+CANDLE_GAPPS_FinalCovars <- CANDLE_GAPPS_Covars %>%
+  dplyr::filter(pathways_id %in% CibersortResults$Mixture)
+
+summary(CANDLE_GAPPS_Covars$Cohort)
+
+#GAPPS Only: PW Data
+sum(gapps_forPlacentalEfficiency$pathways_id %in% CibersortResults$Mixture)
+gappsonly_PW_FinalCovars <- gapps_forPlacentalEfficiency %>%
+  dplyr::filter(pathways_id %in% CibersortResults$Mixture)
+```
+
+### Calculate BW:PW Ratio for GAPPS Only Data
+Birthweight in grams divided by placental weight in grams.
+```{r BWPW}
+gappsonly_PW_FinalCovars$BWPW <- gappsonly_PW_FinalCovars$Birthweight/gappsonly_PW_FinalCovars$PlacentalWeight
+```
+
+### Investigate Cotinine Data to decide about Smoking Composite Variable
+Going to make a composite smoking variable where if smoking self-report or cotinine are detected it is a yes and if neither are detected it is a no. 
+```{r cotinine organize}
+# Pull Cotinine Variables
+CANDLE_cotinine <- candle_covars %>%
+  dplyr::select(pathways_id, cotinine_yn_m1, cotinine_yn_m2)
+#GAPPS cotinine measurement is inside the phthalates data
+Phthalates_GAPPS <- read.csv("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/PhthalateData/gapps_phthalates_042524.csv")
+GAPPS_cotinine <- Phthalates_GAPPS %>%
+  dplyr::select(pathways_id, cotinine_contact_type, cotinine_yn)
+
+#Make CANDLE cotinine into Factors
+CANDLE_cotinine$cotinine_yn_m1 <- as.factor(CANDLE_cotinine$cotinine_yn_m1)
+CANDLE_cotinine$cotinine_yn_m2 <- as.factor(CANDLE_cotinine$cotinine_yn_m2)
+
+# Reduce to only participants with full_covars
+CANDLE_cotinine <- CANDLE_cotinine %>%
+  dplyr::filter(pathways_id %in% CANDLE_GAPPS_FinalCovars$pathways_id)
+GAPPS_cotinine <- GAPPS_cotinine %>%
+  dplyr::filter(pathways_id %in% CANDLE_GAPPS_FinalCovars$pathways_id)
+
+#Aggregate GAPPS data by participants 
+GAPPS_cotinine_agg <- aggregate(cotinine_yn ~ pathways_id, data = GAPPS_cotinine, sum)
+GAPPS_cotinine_agg$Cotinine_composite <- as.factor(ifelse(GAPPS_cotinine_agg$cotinine_yn==1, "Yes", "No"))
+summary(GAPPS_cotinine_agg$Cotinine_composite)
+#Only two participants with cotinine detected at least once vs.4 for self-report. Both cotinine participants were detected by self-report already
+
+#Calculate for CANDLE
+#Impute NAs as 0 for CANDLE for easier classification- checked that all participants had at least 1 cotinine measure 
+CANDLE_cotinine$cotinine_yn_m1[is.na(CANDLE_cotinine$cotinine_yn_m1)] <- 0
+CANDLE_cotinine$cotinine_yn_m2[is.na(CANDLE_cotinine$cotinine_yn_m2)] <- 0
+## Calculate Cotinine Detection as Yes or No across visits
+CANDLE_cotinine$Cotinine_composite <- as.factor(ifelse(CANDLE_cotinine$cotinine_yn_m1==1 & CANDLE_cotinine$cotinine_yn_m2==1 | CANDLE_cotinine$cotinine_yn_m1==1 & CANDLE_cotinine$cotinine_yn_m2==0 , "Yes", "No"))
+
+summary(CANDLE_cotinine$Cotinine_composite)
+
+#Check how well cotinine data overlaps with self-report
+CotCANDLEIDs <- CANDLE_cotinine %>%
+  dplyr::filter(Cotinine_composite == "Yes")
+CANDLESelfReportSmoke <- CANDLE_GAPPS_Covars %>%
+  dplyr::filter(Cohort=="CANDLE", Smoking==1)
+sum(CotCANDLEIDs$pathways_id %in% CANDLESelfReportSmoke$pathways_id)
+
+#Combine CANDLE/GAPPS cotinine into one variable
+GAPPS_cot_final <- GAPPS_cotinine_agg %>%
+  dplyr::select(pathways_id, Cotinine_composite)
+CANDLE_cot_final <- CANDLE_cotinine %>%
+  dplyr::select(pathways_id, Cotinine_composite)
+
+CANDLE_GAPPS_Cotinine <- rbind(GAPPS_cot_final, CANDLE_cot_final)
+
+# Add to Covars
+CANDLE_GAPPS_FinalCovars <- full_join(CANDLE_GAPPS_FinalCovars, CANDLE_GAPPS_Cotinine, by=("pathways_id"))
+
+```
+
+### Organize Cotinine Data for gappsonly dataset
+```{r gappsonly cot}
+GAPPSonly_cotinine <- GAPPS_cotinine %>%
+  dplyr::filter(pathways_id %in% gappsonly_PW_FinalCovars$pathways_id)
+
+GAPPSonly_cotinine_agg <- aggregate(cotinine_yn ~ pathways_id, data = GAPPSonly_cotinine, sum)
+GAPPSonly_cotinine_agg$Cotinine_composite <- as.factor(ifelse(GAPPSonly_cotinine_agg$cotinine_yn==1, "Yes", "No"))
+summary(GAPPSonly_cotinine_agg$Cotinine_composite)
+
+# Add to Covars
+gappsonly_PW_FinalCovars <- full_join(gappsonly_PW_FinalCovars, GAPPSonly_cotinine_agg, by=("pathways_id"))
+```
+
+### Make Smoking Composite Variable
+Composite variable = Yes if at least one timepoint per participant has positive cotinine or positive smoking self-report. 
+```{r smoking composite}
+CANDLE_GAPPS_FinalCovars$SmokingComposite <- ifelse(CANDLE_GAPPS_FinalCovars$Smoking==1 | CANDLE_GAPPS_FinalCovars$Cotinine_composite=="Yes", "Yes", "No")
+CANDLE_GAPPS_FinalCovars$SmokingComposite <-as.factor(CANDLE_GAPPS_FinalCovars$SmokingComposite)
+summary(CANDLE_GAPPS_FinalCovars$SmokingComposite)
+#the 7 NA is from a GAPPS participant with no cotinine measures but 0 as smoking self-report will turn to "No" for the composite
+CANDLE_GAPPS_FinalCovars$SmokingComposite[is.na(CANDLE_GAPPS_FinalCovars$SmokingComposite)] <- "No"
+summary(CANDLE_GAPPS_FinalCovars$SmokingComposite)
+
+### GAPPS only Smoking Composite
+gappsonly_PW_FinalCovars$SmokingComposite <- ifelse(gappsonly_PW_FinalCovars$Smoking==1 | gappsonly_PW_FinalCovars$Cotinine_composite=="Yes", "Yes", "No")
+gappsonly_PW_FinalCovars$SmokingComposite <-as.factor(gappsonly_PW_FinalCovars$SmokingComposite)
+summary(gappsonly_PW_FinalCovars$SmokingComposite)
+#there are 6 NAs from GAPPS participants that don't have cotinine data, but these participants do have self-report data listed as 0- so will impute these as No for the composite
+gappsonly_PW_FinalCovars$SmokingComposite[is.na(gappsonly_PW_FinalCovars$SmokingComposite)] <- "No"
+summary(gappsonly_PW_FinalCovars$SmokingComposite)
+
+```
+
+### Make sPTB Data
+Need to remove participants with inductions or no labor for the preterm birth analysis as well as other cohort specific exclusion criteria as outlined in Paquette et al. 2023 AJOG.
+```{r sPTB Data}
+#First need to separately filter the datasets since there are some unique exclusion criteria for each cohort
+
+#Filter CANDLE for sPTB using AJOG criteria
+dim(candle_selected_covars)
+#check some totals for a few variables
+summary(as.factor(candle_selected_covars$m_chorio))
+summary(as.factor(candle_selected_covars$m_preeclam))
+summary(as.factor(candle_selected_covars$m1mb_chtn))
+summary(as.factor(candle_selected_covars$m1mb_chtn2))
+summary(as.factor(candle_selected_covars$ld_gesthtn4))
+summary(as.factor(candle_selected_covars$ld_cshtn))
+summary(as.factor(candle_selected_covars$ld_mhtn))
+#Only keep 0's and NAs for these variables then remove the variables
+#Note: Placental Abruption already removed
+candle_sPTB_exclusion <- candle_selected_covars %>%
+  dplyr::filter(cg_labor_type %in% c(1,2,4)) %>% #529 after removing inductions
+  dplyr::filter(m_chorio==0 | is.na(m_chorio)) %>% #525 after removing chorioamnionitis
+  dplyr::filter(m_preeclam==0 | is.na(m_preeclam)) %>% #525 after removing preelampsia
+  dplyr::filter(m1mb_chtn ==0 | is.na(m1mb_chtn)) %>% #525 after removing Chronic hypertension in current pregnancy at M1 visit 
+  dplyr::filter(m1mb_chtn2==0 | is.na(m1mb_chtn2)) %>% #525 after removing chronit hypertension ever
+  dplyr::filter(ld_gesthtn4 == 0|is.na(ld_gesthtn4)) %>% #497 after removing PE or gHTN diagnoses since last visit at delivery
+  dplyr::filter(ld_cshtn==0 | is.na(ld_cshtn)) %>% #496 after removing C-section indication: PE/HTN
+  dplyr::filter(ld_mhtn==0 | is.na(ld_mhtn)) %>% #496 after removing delivery classification= PTB-PE/HTN
+  dplyr::select(-h_placental_abrupt, -m_chorio, -m_preeclam, -m1mb_chtn, -m1mb_chtn2, -ld_gesthtn4, -ld_cshtn, -ld_mhtn)
+dim(candle_sPTB_exclusion) #496
+
+sum(candle_sPTB_exclusion$pathways_id %in% CANDLE_GAPPS_FinalCovars$pathways_id)
+
+#Filter GAPPS for sPTB (based on AJOG paper criteria)
+dim(gapps_selected_covars)
+#check some totals for a few variables
+summary(as.factor(gapps_selected_covars$m_chorio_currpreg))
+summary(as.factor(gapps_selected_covars$m_preeclam))
+summary(as.factor(gapps_selected_covars$m_category___9))
+#Only keep 0's and NAs for these variables then remove the variables
+#Note: already removed multiple gestations and placental abruptions earlier
+gapps_sPTB_exclusion <- gapps_selected_covars %>% #465 to start
+  dplyr::filter(cg_labor_type %in% c(1,2,4)) %>% #301 after removing inductions
+  dplyr::filter(m_chorio_currpreg==0|is.na(m_chorio_currpreg)) %>% #287 after removing chorioamnionitis
+  dplyr::filter(m_preeclam==0|is.na(m_preeclam)) %>% #283 after removing preeclampsia
+  dplyr::filter(m_category___9==0|is.na(m_category___9)) %>% #274 after removing cervical insufficiency
+  dplyr::select(-h_multi_gest, -h_placental_abrupt, -m_chorio_currpreg, -m_preeclam, -m_category___9, -m_pl1_weight, -m_pl2_weight)
+dim(gapps_sPTB_exclusion) #274
+
+
+#Prepare to combine
+
+# Add Cohort Marker
+candle_sPTB_exclusion$Cohort <- c("CANDLE")
+gapps_sPTB_exclusion$Cohort <- c("GAPPS")
+
+#Harmonize column names
+colnames(candle_sPTB_exclusion) <- c("pathways_id","BMI", "Education", "Race", "Ethnicity", "FetalSex", "Parity", "LaborType", "DeliveryMethod", "Smoking", "Alcohol", "GestAgeWks", "Birthweight", "Site", "Age", "PPROM", "Batch", "Cohort")
+
+
+colnames(gapps_sPTB_exclusion) <- c("pathways_id", "Age", "BMI", "Education", "Race", "Ethnicity", "FetalSex", "Parity", "LaborType", "DeliveryMethod", "Smoking", "GestAgeDays", "Birthweight", "Site", "Alcohol",  "PPROM", "Batch", "Cohort")
+
+#Harmonize gstational age variables by having weeks and days option for each cohort
+candle_sPTB_exclusion$GestAgeDays <- (candle_sPTB_exclusion$GestAgeWks)*7
+gapps_sPTB_exclusion$GestAgeWks <- (gapps_sPTB_exclusion$GestAgeDays)/7
+
+#Reorder GAPPS Columns to Match CANDLE
+sum(colnames(gapps_sPTB_exclusion)==colnames(candle_sPTB_exclusion))
+sum(colnames(gapps_sPTB_exclusion) %in% colnames(candle_sPTB_exclusion))
+gapps_sPTB_exclusion <- gapps_sPTB_exclusion[, colnames(candle_sPTB_exclusion)]
+sum(colnames(gapps_sPTB_exclusion)==colnames(candle_sPTB_exclusion))
+
+#Remove participants with incomplete covariates
+dim(gapps_sPTB_exclusion)
+gapps_sPTB_complete <- na.omit(gapps_sPTB_exclusion)
+dim(gapps_sPTB_complete)
+
+
+dim(candle_sPTB_exclusion)
+candle_sPTB_complete <- na.omit(candle_sPTB_exclusion)
+dim(candle_sPTB_complete)
+
+#Combine
+candle_gapps_sPTB <- rbind(candle_sPTB_complete, gapps_sPTB_complete)
+dim(candle_gapps_sPTB)
+
+#Make sure that cell deconvolution data is available for all of these participants
+sum(candle_gapps_sPTB$pathways_id %in% CibersortResults$Mixture)
+CANDLE_GAPPS_sPTB_FinalCovars <- candle_gapps_sPTB %>%
+  dplyr::filter(pathways_id %in% CibersortResults$Mixture)
+dim(CANDLE_GAPPS_sPTB_FinalCovars)
+
+summary(as.factor(CANDLE_GAPPS_sPTB_FinalCovars$Cohort))
+
+#Add PTB Variable
+
+CANDLE_GAPPS_sPTB_FinalCovars$PTB <- as.factor(ifelse(CANDLE_GAPPS_sPTB_FinalCovars$GestAgeWks<37, "Yes", "No"))
+summary(CANDLE_GAPPS_sPTB_FinalCovars$PTB)
+
+#Make Labor Status Variable
+CANDLE_GAPPS_sPTB_FinalCovars$LaborStatus <- as.factor(ifelse(CANDLE_GAPPS_sPTB_FinalCovars$LaborType %in% c(1,2), "yes", "no"))
+summary(CANDLE_GAPPS_sPTB_FinalCovars$LaborStatus)
+summary(CANDLE_GAPPS_sPTB_FinalCovars$LaborType)
+
+#Add Smoking Composite-pulling from the larger CANDLE/GAPPS cohort
+CANDLE_cotinine2 <- candle_covars %>%
+  dplyr::select(pathways_id, cotinine_yn_m1, cotinine_yn_m2)
+
+GAPPS_cotinine2 <- Phthalates_GAPPS %>%
+  dplyr::select(pathways_id, cotinine_contact_type, cotinine_yn)
+
+#Make CANDLE cotinine into Factors
+CANDLE_cotinine2$cotinine_yn_m1 <- as.factor(CANDLE_cotinine2$cotinine_yn_m1)
+CANDLE_cotinine2$cotinine_yn_m2 <- as.factor(CANDLE_cotinine2$cotinine_yn_m2)
+
+# Reduce to only participants with full_covars
+CANDLE_cotinine2 <- CANDLE_cotinine2 %>%
+  dplyr::filter(pathways_id %in% CANDLE_GAPPS_sPTB_FinalCovars$pathways_id)
+GAPPS_cotinine2 <- GAPPS_cotinine2 %>%
+  dplyr::filter(pathways_id %in% CANDLE_GAPPS_sPTB_FinalCovars$pathways_id)
+
+#Aggregate GAPPS data by participants 
+GAPPS_cotinine_agg2 <- aggregate(cotinine_yn ~ pathways_id, data = GAPPS_cotinine2, sum)
+GAPPS_cotinine_agg2$Cotinine_composite <- as.factor(ifelse(GAPPS_cotinine_agg2$cotinine_yn==1, "Yes", "No"))
+summary(GAPPS_cotinine_agg2$Cotinine_composite)
+summary(gapps_sPTB_complete$Smoking)
+#Only two participants with cotinine detected at least once vs.4 for self-report. Both cotinine participants were detected by self-report already
+
+#Calculate for CANDLE
+#Impute NAs as 0 for CANDLE for easier classification- checked that all participants had at least 1 cotinine measure 
+CANDLE_cotinine2$cotinine_yn_m1[is.na(CANDLE_cotinine2$cotinine_yn_m1)] <- 0
+CANDLE_cotinine2$cotinine_yn_m2[is.na(CANDLE_cotinine2$cotinine_yn_m2)] <- 0
+## Calculate Cotinine Detection as Yes or No across visits
+CANDLE_cotinine2$Cotinine_composite <- as.factor(ifelse(CANDLE_cotinine2$cotinine_yn_m1==1 & CANDLE_cotinine2$cotinine_yn_m2==1 | CANDLE_cotinine2$cotinine_yn_m1==1 & CANDLE_cotinine2$cotinine_yn_m2==0 , "Yes", "No"))
+
+summary(CANDLE_cotinine2$Cotinine_composite)
+
+#Check how well cotinine data overlaps with self-report
+CotCANDLEIDs2 <- CANDLE_cotinine2 %>%
+  dplyr::filter(Cotinine_composite == "Yes")
+CANDLESelfReportSmoke2 <- CANDLE_GAPPS_sPTB_FinalCovars %>%
+  dplyr::filter(Cohort=="CANDLE", Smoking==1)
+sum(CotCANDLEIDs2$pathways_id %in% CANDLESelfReportSmoke2$pathways_id)
+
+#Combine CANDLE/GAPPS cotinine into one variable
+GAPPS_cot_final2 <- GAPPS_cotinine_agg2 %>%
+  dplyr::select(pathways_id, Cotinine_composite)
+CANDLE_cot_final2 <- CANDLE_cotinine2 %>%
+  dplyr::select(pathways_id, Cotinine_composite)
+
+CANDLE_GAPPS_Cotinine2 <- rbind(GAPPS_cot_final2, CANDLE_cot_final2)
+
+# Add to Covars
+dim(CANDLE_GAPPS_sPTB_FinalCovars)
+dim(CANDLE_GAPPS_Cotinine2)
+CANDLE_GAPPS_sPTB_FinalCovars <- full_join(CANDLE_GAPPS_sPTB_FinalCovars, CANDLE_GAPPS_Cotinine2, by=("pathways_id"))
+
+#Make Smoking Composite Variable
+
+CANDLE_GAPPS_sPTB_FinalCovars$SmokingComposite <- ifelse(CANDLE_GAPPS_sPTB_FinalCovars$Smoking==1 | CANDLE_GAPPS_sPTB_FinalCovars$Cotinine_composite=="Yes", "Yes", "No")
+CANDLE_GAPPS_sPTB_FinalCovars$SmokingComposite <-as.factor(CANDLE_GAPPS_sPTB_FinalCovars$SmokingComposite)
+summary(CANDLE_GAPPS_sPTB_FinalCovars$SmokingComposite)
+#the 3 NA is from a GAPPS participant with no cotinine measures but 0 as smoking self-report will turn to "No" for the composite
+CANDLE_GAPPS_sPTB_FinalCovars$SmokingComposite[is.na(CANDLE_GAPPS_sPTB_FinalCovars$SmokingComposite)] <- "No"
+summary(CANDLE_GAPPS_sPTB_FinalCovars$SmokingComposite)
+
+```
+
+### Collapse Education
+Going to collapse the education variable to high school or less and some college or more
+```{r edu collapse}
+#Full Covariates (N=1009)
+summary(CANDLE_GAPPS_FinalCovars$Education)
+
+CANDLE_GAPPS_FinalCovars$EducationCollapsed<-recode(CANDLE_GAPPS_FinalCovars$Education, '1'="1", '2'="1", '3'="2", '4'="2")
+
+CANDLE_GAPPS_FinalCovars$EducationCollapsed <- as.factor(CANDLE_GAPPS_FinalCovars$EducationCollapsed)
+
+summary(CANDLE_GAPPS_FinalCovars$EducationCollapsed)
+
+#PTB Covariates (N=635)
+
+summary(CANDLE_GAPPS_sPTB_FinalCovars$Education)
+
+CANDLE_GAPPS_sPTB_FinalCovars$EducationCollapsed<-recode(CANDLE_GAPPS_sPTB_FinalCovars$Education, '1'="1", '2'="1", '3'="2", '4'="2")
+
+CANDLE_GAPPS_sPTB_FinalCovars$EducationCollapsed <- as.factor(CANDLE_GAPPS_sPTB_FinalCovars$EducationCollapsed)
+
+summary(CANDLE_GAPPS_sPTB_FinalCovars$EducationCollapsed)
+
+# BWPW Covariates (Gapps Only N=166)
+summary(gappsonly_PW_FinalCovars$Education)
+
+gappsonly_PW_FinalCovars$EducationCollapsed<-recode(gappsonly_PW_FinalCovars$Education, '1'="1", '2'="1", '3'="2", '4'="2")
+
+gappsonly_PW_FinalCovars$EducationCollapsed <- as.factor(gappsonly_PW_FinalCovars$EducationCollapsed)
+
+summary(gappsonly_PW_FinalCovars$EducationCollapsed)
+
+```
+
+### Collapse Race
+Going to collapse american indian/alaska native into the Other category since it had 2 or fewer participants for each group
+```{r race collapse}
+#Full Covariates (N=1009)
+summary(CANDLE_GAPPS_FinalCovars$Race)
+
+CANDLE_GAPPS_FinalCovars$RaceCollapsed<-recode(CANDLE_GAPPS_FinalCovars$Race, '1'="1", '2'="2", '3'="3", '5'="6", '6'="6", '7'="7")
+
+CANDLE_GAPPS_FinalCovars$RaceCollapsed <- as.factor(CANDLE_GAPPS_FinalCovars$RaceCollapsed)
+
+summary(CANDLE_GAPPS_FinalCovars$RaceCollapsed)
+
+#PTB Covariates (N=635)
+
+summary(CANDLE_GAPPS_sPTB_FinalCovars$Race)
+
+CANDLE_GAPPS_sPTB_FinalCovars$RaceCollapsed<-recode(CANDLE_GAPPS_sPTB_FinalCovars$Race, '1'="1", '2'="2", '3'="3", '5'="6", '6'="6", '7'="7")
+
+CANDLE_GAPPS_sPTB_FinalCovars$RaceCollapsed <- as.factor(CANDLE_GAPPS_sPTB_FinalCovars$RaceCollapsed)
+
+summary(CANDLE_GAPPS_sPTB_FinalCovars$RaceCollapsed)
+
+# BWPW Covariates (Gapps Only N=166)
+summary(gappsonly_PW_FinalCovars$Race)
+
+gappsonly_PW_FinalCovars$RaceCollapsed<-recode(gappsonly_PW_FinalCovars$Race, '1'="1", '2'="2", '3'="3", '5'="6", '6'="6", '7'="7")
+
+gappsonly_PW_FinalCovars$RaceCollapsed <- as.factor(gappsonly_PW_FinalCovars$RaceCollapsed)
+
+summary(gappsonly_PW_FinalCovars$RaceCollapsed)
+```
+
+### Calculate BW Z-Scores
+CAlculate BW Z-Score using Intergrowth-21. We only need BW Z-score for the N=1009 CANDLE/GAPPS dataset, so not calculating for the others right now.
+```{r zscore}
+CANDLE_GAPPS_FinalCovars <- CANDLE_GAPPS_FinalCovars %>%
+  mutate(
+    BW_kg = Birthweight / 1000,
+    FetalSex_full = recode(FetalSex, "M" = "Male", "F" = "Female"))
+
+CANDLE_GAPPS_FinalCovars$bw_z <- igb_wtkg2zscore(
+  sex = CANDLE_GAPPS_FinalCovars$FetalSex_full,
+  ga = CANDLE_GAPPS_FinalCovars$GestAgeDays,
+  wtkg = CANDLE_GAPPS_FinalCovars$BW_kg
+)
+
+#Make some plots
+#Plot GA in Days vs. Wt. in Kg
+plot(CANDLE_GAPPS_FinalCovars$BW_kg, CANDLE_GAPPS_FinalCovars$GestAgeDays)
+#Plot histogram of Z-score
+hist(CANDLE_GAPPS_FinalCovars$bw_z)
+
+
+### Also going to calculate for the other covar sets for the main summary table
+CANDLE_GAPPS_sPTB_FinalCovars <- CANDLE_GAPPS_sPTB_FinalCovars %>%
+  mutate(
+    BW_kg = Birthweight / 1000,
+    FetalSex_full = recode(FetalSex, "M" = "Male", "F" = "Female"))
+
+CANDLE_GAPPS_sPTB_FinalCovars$bw_z <- igb_wtkg2zscore(
+  sex = CANDLE_GAPPS_sPTB_FinalCovars$FetalSex_full,
+  ga = CANDLE_GAPPS_sPTB_FinalCovars$GestAgeDays,
+  wtkg = CANDLE_GAPPS_sPTB_FinalCovars$BW_kg
+)
+
+
+gappsonly_PW_FinalCovars <- gappsonly_PW_FinalCovars %>%
+  mutate(
+    BW_kg = Birthweight / 1000,
+    FetalSex_full = recode(FetalSex, "M" = "Male", "F" = "Female"))
+
+gappsonly_PW_FinalCovars$bw_z <- igb_wtkg2zscore(
+  sex = gappsonly_PW_FinalCovars$FetalSex_full,
+  ga = gappsonly_PW_FinalCovars$GestAgeDays,
+  wtkg = gappsonly_PW_FinalCovars$BW_kg
+)
+
+
+```
+
+### Drop empty factor levels
+```{r}
+CANDLE_GAPPS_FinalCovars <- droplevels(CANDLE_GAPPS_FinalCovars)
+gappsonly_PW_FinalCovars <- droplevels(gappsonly_PW_FinalCovars)
+CANDLE_GAPPS_sPTB_FinalCovars <- droplevels(CANDLE_GAPPS_sPTB_FinalCovars)
+```
+
+### Summarize
+```{r summarize}
+#Combined Summary
+summary(CANDLE_GAPPS_FinalCovars)
+#Combined- GAPPS only
+summary(CANDLE_GAPPS_FinalCovars %>%
+          dplyr::filter(Cohort=="GAPPS"))
+#Combined- CANDLE only
+summary(CANDLE_GAPPS_FinalCovars %>%
+          dplyr::filter(Cohort=="CANDLE"))
+
+#Summary of Placental Weight GAPPS Only Data
+summary(gappsonly_PW_FinalCovars)
+
+# Summary of PTB DAtaset
+summary(CANDLE_GAPPS_sPTB_FinalCovars)
+
+#PTB- GAPPS only
+summary(CANDLE_GAPPS_sPTB_FinalCovars %>%
+          dplyr::filter(Cohort=="GAPPS"))
+#PTB- CANDLE only
+summary(CANDLE_GAPPS_sPTB_FinalCovars %>%
+          dplyr::filter(Cohort=="CANDLE"))
+```
+
+### Save Final Covars
+Saving as .RData files to retain factor status
+Saving as .csv for easy viewing
+```{r save}
+#CANDLE/GAPPS Combined
+#write.csv(CANDLE_GAPPS_FinalCovars, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_111825.csv")
+#save(CANDLE_GAPPS_FinalCovars, file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_111825.RData")
+
+#GAPPS Only: PW Data
+#write.csv(gappsonly_PW_FinalCovars, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_GAPPSOnly_PlacWeight_111825.csv")
+#save(gappsonly_PW_FinalCovars, file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_GAPPSOnly_PlacWeight_111825.RData")
+
+## CANDLE/GAPPS sPTB DAta
+#write.csv(CANDLE_GAPPS_sPTB_FinalCovars, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_sPTB_122325.csv")
+#save(CANDLE_GAPPS_sPTB_FinalCovars, file="/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_sPTB_122325.RData")
+
+```
