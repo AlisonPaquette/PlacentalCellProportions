@@ -234,6 +234,30 @@ get_df["dendf"]
 # calculate bootstrap corrected p-value using the median F-statistic 
 # p value for the entire compositional effect.
 boot_pvalue <- pf(median(bootstrap_results$Fstat), get_df["numdf"], get_df["dendf"], lower.tail=F)
+print(boot_pvalue)
+
+###########################################
+############################################ p values with fdr!!
+###########################################
+#Calculate two-sided bootstrap p-value for each individual cell type
+
+boot_pvalues <- sapply(cell_types, function(x) {
+b <- bootstrap_results[[x]]
+half.pval <- mean(b > 0) +
+0.5 * mean(b == 0)
+2 * min(c(half.pval, 1 - half.pval))
+})
+
+boot_pvalues <- data.frame(cell_type = cell_types, p_value = boot_pvalues)
+#p-values that are 0 are because they are below the minimum that can be calculated with 1000 bootstraps (0.002). here I'm going to turn these 0's into the minimum for estimated FDRs
+boot_pvalues <- boot_pvalues %>%
+  dplyr::mutate(pvalues_withMin = case_when(
+    p_value > 0 ~ p_value, 
+    p_value == 0~ 0.002
+  ))
+# FDR correction- calculating FDR here now with the actual p-values and then the p-values iwth the minimum imputed.
+boot_pvalues$p_fdr <- p.adjust(boot_pvalues$p_value, method = "BH")
+boot_pvalues$p_fdr_withMin <- p.adjust(boot_pvalues$pvalues_withMin, method="BH")
 
 # original estimate from exp_change. This is the estimate we are bootstrapping 95% CIs around
 exp_change_original = as.data.frame(exp_change)
@@ -243,6 +267,7 @@ boot_CIs$cell_type <- rownames(boot_CIs)
 
 final_res = exp_change_original %>% left_join(boot_CIs) %>% 
   mutate(overall_composition_p_value=boot_pvalue) %>% 
+    left_join(boot_pvalues, by = "cell_type") %>% #### join the new FDR here
   dplyr::rename(conf.low = "2.5%",
                 conf.high = "97.5%")%>% 
   mutate(exp_change = exp_change*100, # multiply by 100 to get % instead of proportion
@@ -250,7 +275,7 @@ final_res = exp_change_original %>% left_join(boot_CIs) %>%
          conf.high= conf.high*100) %>% 
     mutate(estimate_with_ci = paste0(
     round(exp_change, 3), " [", round(conf.low, 3), " to ", round(conf.high, 3), "]")) %>% 
-  dplyr::select(cell_type, exp_change, conf.low, conf.high, estimate_with_ci, overall_composition_p_value)%>%
+  dplyr::select(cell_type, exp_change, conf.low, conf.high, estimate_with_ci, overall_composition_p_value, p_value, pvalues_withMin, p_fdr, p_fdr_withMin)%>%
   mutate(significant = if_else(
     sign(exp_change) == sign(conf.low) & sign(exp_change) == sign(conf.high),  # Check if all signs are the same to evaluate significance
     "yes", 
@@ -261,7 +286,7 @@ final_res=final_res%>%
   mutate(cell_type = factor(cell_type, levels = composition_order_underscores)) %>%
   arrange(cell_type)
 
-#write_csv(final_res, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/PlacentalEfficiency/BWadj_CellProportions_BootstrapResults_N166_GAPPS_020926.csv")
+#write_csv(final_res, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/PlacentalEfficiency/BWadj_CellProportions_BootstrapResults_N166_GAPPS_FDR_100326.csv")
 
 ###
 #### same thing but for multiplicative changes
@@ -287,11 +312,12 @@ boot_CIs = t(boot_CIs) %>% as.data.frame()
 boot_CIs$cell_type <- rownames(boot_CIs)
 
 final_res_relative = exp_change_original %>% left_join(boot_CIs) %>% 
+    left_join(boot_pvalues, by = "cell_type") %>% #### join the new FDR here
   dplyr::rename(conf.low = "2.5%",
                 conf.high = "97.5%")%>%  
     mutate(estimate_with_ci = paste0(
     round(exp_change_relative, 3), " [", round(conf.low, 3), " to ", round(conf.high, 3), "]")) %>% 
-  dplyr::select(cell_type, exp_change_relative, conf.low, conf.high, estimate_with_ci)%>%
+  dplyr::select(cell_type, exp_change_relative, conf.low, conf.high, estimate_with_ci, p_value, pvalues_withMin, p_fdr, p_fdr_withMin)%>%
   mutate(significant = if_else(
     (exp_change_relative > 1 & conf.low > 1 & conf.high > 1) | (exp_change_relative < 1 & conf.low < 1 & conf.high < 1), 
     "yes", 
@@ -300,7 +326,7 @@ final_res_relative=final_res_relative%>%
   mutate(cell_type = factor(cell_type, levels = composition_order_underscores)) %>%
   arrange(cell_type)
 
-#write_csv(final_res_relative, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/PlacentalEfficiency/BWadj_CellProportions_BootstrapResults_Multiplicative_N166_GAPPS_020926.csv")
+#write_csv(final_res_relative, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/PlacentalEfficiency/BWadj_CellProportions_BootstrapResults_Multiplicative_N166_GAPPS_FDR_100326.csv")
 ```
 
 ### BWadj and Cell Proportions- Beta Regression

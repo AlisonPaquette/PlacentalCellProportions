@@ -1,0 +1,224 @@
+---
+title: "CellProportions_FetalSex"
+author: "Samantha Lapehn"
+date: "2026-01-30"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Cell Proportions by Fetal Sex N=1009
+
+Making a boxplot and performing a t-test for cell differences by fetal sex
+
+Update: 4/23/26 to change the formatting of some of the cell names.
+
+### Upload Data and Load Packages
+```{r data and packages}
+#Load Packages
+library(tidyverse)
+library(pheatmap)
+library(forcats)
+library(ggbreak)
+
+#Load Data- Using N=1009 for the heatmap
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/DeconvolutionData/ImputedCellProportions_withcollapse_CANDLEGAPPS_N1009_111825.RData")
+load("/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Data/CovariateData/FilteredCovariates_CANDLEGAPPS_111825.RData")
+
+```
+
+### Update Cell Type Formatting
+```{r cell type formatting}
+#Remove underscores from column names
+colnames(ciber_cells_impute_res) <- gsub("_", " ", colnames(ciber_cells_impute_res))
+colnames(ciber_cells_impute_res) <- tools::toTitleCase(colnames(ciber_cells_impute_res))
+
+#Fix some immune cell type issues
+colnames(ciber_cells_impute_res)  <- gsub("Cd4", "CD4+", colnames(ciber_cells_impute_res))
+colnames(ciber_cells_impute_res)  <- gsub("Cd8", "CD8+", colnames(ciber_cells_impute_res))
+colnames(ciber_cells_impute_res)  <- gsub("Cd14", "CD14+", colnames(ciber_cells_impute_res))
+colnames(ciber_cells_impute_res)  <- gsub("Fcgr3a", "FCGR3A", colnames(ciber_cells_impute_res))
+colnames(ciber_cells_impute_res)  <- gsub("t Cells", "T-cells", colnames(ciber_cells_impute_res))
+colnames(ciber_cells_impute_res)  <- gsub("b Cells", "B-cells", colnames(ciber_cells_impute_res))
+colnames(ciber_cells_impute_res)  <- gsub("GZMB", "GzmB+", colnames(ciber_cells_impute_res))
+colnames(ciber_cells_impute_res)  <- gsub("GZMK", "GzmK+", colnames(ciber_cells_impute_res))
+#Fix pathways_id variable
+colnames(ciber_cells_impute_res)  <- gsub("Pathways Id", "pathways_id", colnames(ciber_cells_impute_res))
+```
+
+
+### Prepare Data
+```{r data prep}
+CellProp <- ciber_cells_impute_res
+
+rownames(CellProp) <- CellProp$pathways_id
+
+CellProp <- CellProp %>%
+  dplyr::select(-pathways_id)
+
+summary(CellProp)
+
+```
+
+### Fetal Sex Boxplot
+```{r fetal sex boxplot}
+
+#Reorganize
+CellProp$pathways_id <- rownames(CellProp)
+CellProp_long <- pivot_longer(CellProp,
+                              cols=-pathways_id,
+                          names_to="CellType", 
+                          values_to="Proportion")
+#Pull Fetal Sex Info
+FetalSex <- CANDLE_GAPPS_FinalCovars %>%
+  dplyr::select(FetalSex, pathways_id)
+
+#Add Annotation
+CellProp_long <- full_join(CellProp_long,FetalSex, by=c("pathways_id"))
+
+#Add Cell Category Information
+print(unique(CellProp_long$CellType))
+VascularStromalCells <-c("Fetal Fibroblasts", "Fetal Nucleated Red Blood Cells", "Fetal Endothelial Cells", "Fetal Mesenchymal Stem Cells") 
+FetalImmune <- c("Fetal CD14+ Monocytes", "Fetal CD14+ Monocytes", "Fetal Natural Killer T-cells", "Fetal Memory CD4+ T-cells", "Fetal Hofbauer Cells", "Fetal Natural Killer GzmB+ GzmK+", "Fetal Naive CD8+ T-cells")
+MaternalImmune <- c("Maternal CD8+ Activated T-cells", "Maternal FCGR3A Monocytes", "Maternal CD14+ Monocytes", "Maternal Natural Killer Cells", "Maternal B-cells", "Maternal Naive CD8+ T-cells")
+Trophoblasts <- c("Fetal Cytotrophoblasts", "Fetal Extravillous Trophoblasts", "Fetal Syncytiotrophoblast")
+
+mapping <- c(
+  setNames(rep("Vascular and Stromal Cells", length(VascularStromalCells)), VascularStromalCells),
+  setNames(rep("Fetal Immune Cells", length(FetalImmune)), FetalImmune),
+  setNames(rep("Maternal Immune Cells", length(MaternalImmune)), MaternalImmune),
+  setNames(rep("Trophoblast Cells", length(Trophoblasts)), Trophoblasts)
+)
+
+# Apply it to your dataframe (assuming your column is called 'CellType')
+CellProp_long$CellCategory <- mapping[CellProp_long$CellType]
+
+#Add annotation about significance
+# t-test for fetal sex
+t_test_results <- CellProp_long %>%
+  group_by(CellType) %>%
+  summarise(
+    t_test = list(t.test(Proportion ~ FetalSex)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    tidied = map(t_test, broom::tidy)
+  ) %>%
+  unnest(tidied) %>%
+  select(CellType, estimate1, estimate2, statistic, p.value, conf.low, conf.high)
+
+t_test_results
+
+Sig_t_test_fetalsex <- t_test_results %>%
+  dplyr::filter(p.value<0.05)
+print(Sig_t_test_fetalsex)
+
+sig_map <- t_test_results %>%
+  select(CellType, p.value) %>%
+  mutate(Sig = if_else(p.value < 0.05, "Yes", "No"))
+
+CellProp_long <- CellProp_long %>%
+  left_join(sig_map, by = "CellType")
+
+ordered_levels <- levels(fct_reorder(CellProp_long$CellType, CellProp_long$Proportion, .fun = median))
+
+
+sig_colors <- CellProp_long %>%
+  distinct(CellType, Sig) %>%
+  mutate(Color = if_else(Sig == "Yes", "red", "black")) %>%
+  select(CellType, Color) %>%  # Keep only these 2 columns for deframe
+  deframe()
+
+#Make Boxplot of all cell types together
+ggplot(CellProp_long, aes(
+    y = fct_reorder(CellType, Proportion, .fun = median),
+    x = Proportion,
+    fill = FetalSex
+  )) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(y = "", x = "Proportion") +
+  theme(
+    # Use the named vector to color only the labels in the current plot order
+    axis.text.y = element_text(color = sig_colors[ordered_levels], face = "bold")
+  )
+
+# Make Boxplot faceted by cell category
+#Make column to indicate which cell types should be colored based on significance
+CellProp_long <- CellProp_long %>%
+  mutate(CellTypeColored = if_else(
+    Sig == "Yes", 
+    paste0("<span style='color:red;'>**", CellType, "**</span>"), 
+    CellType
+  ))
+
+#Plot
+library(ggtext)
+ggplot(CellProp_long, aes(
+    # Reorder based on Proportion, but use the colored strings for the axis
+    y = fct_reorder(CellTypeColored, Proportion, .fun = median, .desc = FALSE),
+    x = Proportion,
+    fill = FetalSex
+  )) +
+  geom_boxplot() +
+  facet_wrap(~CellCategory, scales = "free", ncol = 1) + 
+  theme_bw() +
+  labs(y = "", x = "Proportion", fill = "Fetal Sex") +
+  theme(
+    # This is the "magic" line that tells ggplot to render the HTML tags
+    axis.text.y = element_markdown(),
+    strip.text = element_text(face = "bold") # Makes category names pop
+  )
+
+
+```
+
+### Evaluate difference amounts
+```{r difference amounts}
+FemaleOnly <- CellProp_long %>%
+  dplyr::filter(FetalSex=="F") %>%
+  dplyr::filter(Sig=="Yes")
+FemaleSummary <- FemaleOnly %>%
+  group_by(CellType) %>%
+  summarize(
+    mean_val   = mean(Proportion, na.rm = TRUE),
+    median_val = median(Proportion, na.rm=TRUE), 
+    sd_val     = sd(Proportion, na.rm = TRUE)
+  )
+
+MaleOnly <- CellProp_long %>%
+  dplyr::filter(FetalSex=="M") %>%
+  dplyr::filter(Sig=="Yes")
+MaleSummary <- MaleOnly %>%
+  group_by(CellType) %>%
+  summarize(
+    mean_val   = mean(Proportion, na.rm = TRUE),
+    median_val = median(Proportion, na.rm=TRUE), 
+    sd_val     = sd(Proportion, na.rm = TRUE)
+  )
+
+CombinedSummary <- inner_join(FemaleSummary, MaleSummary, 
+                              by = "CellType", 
+                              suffix = c("_female", "_male"))
+
+
+CombinedSummary <- CombinedSummary %>%
+  mutate(Difference = (median_val_female - median_val_male)*100) %>%
+  select(CellType, Difference) 
+
+print(CombinedSummary)
+
+
+```
+
+
+
+
+
+
+
+

@@ -86,7 +86,7 @@ clusterEvalQ(cl, {
 
 clusterExport(cl, varlist = c("nboot", "data", "cell_types"))
 
-tmp <- parLapplyLB(cl, 1:nboot, function(b) {
+tmp <- parLapply(cl, 1:nboot, function(b) {
   
   # Sample with replacement
   rep_idx <- sample(seq_len(nrow(data)), size = nrow(data), replace = TRUE)
@@ -146,6 +146,31 @@ estimates <- data.frame(
   row.names = NULL
 )
 
+# Two-sided empirical bootstrap p-values per cell type
+boot_pvalues <- sapply(cell_types, function(x) {
+  # Difference in marginal predicted compositions (PTB_Yes - PTB_No)
+  b <- boot_yes[[x]] - boot_no[[x]] 
+  
+  half_pval <- mean(b > 0) + 0.5 * mean(b == 0)
+  2 * min(c(half_pval, 1 - half_pval))
+})
+
+pval_DF <- data.frame(
+  CellType = cell_types,
+  p_value = boot_pvalues,
+  stringsAsFactors = FALSE
+)
+
+#p-values that are 0 are because they are below the minimum that can be calculated with 1000 bootstraps (0.002). here I'm going to turn these 0's into the minimum for estimated FDRs
+pval_DF <- pval_DF %>%
+  dplyr::mutate(pvalues_withMin = case_when(
+    p_value > 0 ~ p_value, 
+    p_value == 0~ 0.002
+  ))
+# FDR correction- calculating FDR here now with the actual p-values and then the p-values iwth the minimum imputed.
+pval_DF$p_fdr <- p.adjust(pval_DF$p_value, method = "BH")
+pval_DF$p_fdr_withMin <- p.adjust(pval_DF$pvalues_withMin, method="BH")
+
 #Calculate percent difference in mean cell composition by PTB Status: Positive percent= higher in PTB
 estimates$percent_diff <- 100 * (estimates$PTB_Yes - estimates$PTB_No) / estimates$PTB_No
 #Display Composition as Percentages
@@ -178,7 +203,7 @@ significance_df <- data.frame(
 )
 #Combine all REsults into one summary table
 
-BootstrapSummary <- cbind(estimates, ci_df, significance_df)
+BootstrapSummary <- cbind(estimates, ci_df, significance_df, pval_DF)
 BootstrapSummary <- BootstrapSummary %>%
   dplyr::select(-CellType, -PTB_No, -PTB_Yes)
 
@@ -204,7 +229,7 @@ BootstrapSummary$AbsoluteDiff <- (as.numeric(BootstrapSummary$PTB_Yes_Percent) -
 BootstrapSummary$Abs_CI_Low  <- ci_diff[1, ] * 100
 BootstrapSummary$Abs_CI_High <- ci_diff[2, ] * 100
 
-#write_csv(BootstrapSummary, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_CellProportions_BootstrapResults_N635_020926.csv")
+#write_csv(BootstrapSummary, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_CellProportions_BootstrapResults_N635_FDR_100426.csv")
 ```
 
 ### Beta-Regression
@@ -311,7 +336,7 @@ betareg_sPTB <- betareg_sPTB %>%
   arrange(cell_type) %>%
   left_join(percent_detected, by = "cell_type")
 
-#write_csv(betareg_sPTB, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_CellProportions_BetaRegressionResults_N635_020926.csv")
+#write_csv(betareg_sPTB, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_CellProportions_BetaRegressionResults_N635_FDR_100326.csv")
 ```
 
 ### Compare across Regression Types
@@ -356,7 +381,7 @@ ggplot(CombinedResults, aes(x=RegressionType, y=CellType, fill=Estimate)) +
 rownames(CombinedResults) <- NULL
 
 #Save Combined Results
-#write.csv(CombinedResults, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_N635_CombinedResults_020926.csv")
+#write.csv(CombinedResults, "/Volumes/paquette_a/slapehn/CellProportions_CANDLE_GAPPS/Results/sPTB/sPTB_N635_CombinedResults_100426.csv")
 ```
 
 
